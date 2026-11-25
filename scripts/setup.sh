@@ -46,10 +46,10 @@ fi
 # 2. Backup (every run, unique name, so each run is recoverable).
 backup $SETTINGS
 
-# 3. Settings merge. Skip the write when values already match, so re-runs leave the file byte-identical.
-if ! jq -e '.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite"' $SETTINGS >/dev/null; then
-  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite"'
-  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE")
+# 3. Settings merge (update channel, caveman lite, Claude Code telemetry off). Skip the write when values already match, so re-runs leave the file byte-identical.
+if ! jq -e '.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite" and .env.DISABLE_TELEMETRY == "1"' $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite" | .env.DISABLE_TELEMETRY = "1"'
+  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE, env.DISABLE_TELEMETRY")
 fi
 
 # 4. Local marketplace (name comes from .claude-plugin/marketplace.json).
