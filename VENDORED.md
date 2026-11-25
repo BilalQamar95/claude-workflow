@@ -70,3 +70,17 @@ Then:
 2. Re-run the greps in the "Grep review" section, and the cross-reference grep for `staff:` references.
 3. Re-apply the local edits listed above, update the SHA and reviewed columns, and refresh the dangling-reference list.
 4. Run `claude plugin validate plugins/staff` and `claude --plugin-dir plugins/staff plugin details staff`.
+
+## Machine plugins
+
+Third-party marketplace plugins installed on this machine, recorded 2026-11-25 (read from `claude plugin list --json`, `~/.claude/plugins/installed_plugins.json` and `git -C ~/.claude/plugins/marketplaces/<name> rev-parse HEAD`). Re-check on every bump.
+
+| marketplace | plugin | installed version | installed commit | marketplace checkout HEAD | date |
+|---|---|---|---|---|---|
+| caveman (JuliusBrussee/caveman) | caveman | 14d4f2e21a16 | 14d4f2e21a16b573373ca24698cd6bd3db75bf52 | 14d4f2e21a16b573373ca24698cd6bd3db75bf52 | 2026-11-25 |
+| ponytail (DietrichGebert/ponytail) | ponytail | 5.3.3 | ebd8654c2c627f721eb8f9c0d1bd4090a29f9e10 | ebd8654c2c627f721eb8f9c0d1bd4090a29f9e10 | 2026-11-25 |
+| thedotmack (thedotmack/claude-mem) | claude-mem | 16.1.5 | 11b47f9f4b8dc3614fab7452647f578886468849 | 11b47f9f4b8dc3614fab7452647f578886468849 | 2026-11-25 |
+| openai-codex (openai/codex-plugin-cc) | codex | 1.0.6 | db52e28f4d9ded852ab3942cea316258ae4ef346 | db52e28f4d9ded852ab3942cea316258ae4ef346 | 2026-11-25 |
+| cc-marketplace (kenryu42/cc-marketplace) | safety-net | 0.8.2 | a8acf4db1c0d73964b51be6c4c125def2443da5d | ca75085158a57cd620d57385f9560cab936e38fa | 2026-11-25 |
+
+Pinning by SHA is possible via settings `extraKnownMarketplaces.<name>.source.ref` (Claude Code ≥2.1.324); deferred to stage 2 because re-registering uninstalls plugins.
