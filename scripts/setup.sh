@@ -37,9 +37,14 @@ if ! command -v gh >/dev/null; then
   changed+=("installed gh")
   print "run: gh auth login"
 fi
+# pyright-lsp plugin runs pyright-langserver. npm, not brew: brew builds llvm+rust from source on Intel Macs.
 if ! command -v pyright-langserver >/dev/null; then
-  brew install pyright  # pyright-lsp plugin runs pyright-langserver
-  changed+=("installed pyright")
+  if command -v npm >/dev/null; then
+    npm install -g pyright@1.1.414
+    changed+=("installed pyright@1.1.414")
+  else
+    print -u2 "warning: npm not found; pyright-lsp needs: npm install -g pyright@1.1.414"
+  fi
 fi
 [[ -f $SETTINGS ]] || { print -u2 "missing $SETTINGS"; exit 1; }
 
