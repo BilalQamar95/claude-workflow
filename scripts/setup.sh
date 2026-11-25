@@ -113,7 +113,28 @@ fi
 
 # 8. Third-party marketplace pinning: recorded in VENDORED.md ("Machine plugins"), not done here.
 
-# 9. Summary (names only; never values from settings files).
+# 9. Global guidelines: Karpathy CLAUDE.md. Upstream has no licence, so it is fetched, never committed (see VENDORED.md).
+KARPATHY_URL=https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/2c606141936f1eeef17fa3043a72095b4765b9c2/CLAUDE.md
+KARPATHY_SHA=694a2d721e41c385f3db492838c23299826df5ba9809e3b0721aac70021e196a
+GUIDELINES=$HOME/.claude/CLAUDE.md
+if [[ ! -e $GUIDELINES ]]; then
+  tmp=$(mktemp "$GUIDELINES.XXXXXX")
+  if ! curl -fsSL -o $tmp $KARPATHY_URL; then
+    rm -f -- "$tmp"; tmp=
+    print -u2 "failed to fetch $KARPATHY_URL; nothing written"; exit 1
+  fi
+  if [[ $(shasum -a 256 $tmp | cut -d' ' -f1) != $KARPATHY_SHA ]]; then
+    rm -f -- "$tmp"; tmp=
+    print -u2 "sha256 mismatch for $KARPATHY_URL (expected $KARPATHY_SHA); nothing written"; exit 1
+  fi
+  chmod 644 $tmp && mv $tmp $GUIDELINES || { rm -f -- "$tmp"; tmp=; exit 1; }
+  tmp=
+  changed+=("installed ~/.claude/CLAUDE.md (pinned Karpathy guidelines)")
+elif [[ $(shasum -a 256 $GUIDELINES | cut -d' ' -f1) != $KARPATHY_SHA ]]; then
+  print -u2 "warning: ~/.claude/CLAUDE.md differs from pinned Karpathy guidelines; left unchanged"
+fi
+
+# 10. Summary (names only; never values from settings files).
 if (( ${#changed} )); then
   print "changed:"; printf '  %s\n' "${changed[@]}"
 else

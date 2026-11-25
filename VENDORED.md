@@ -55,6 +55,12 @@ References to skills not vendored here. Text is left as upstream wrote it.
 - `claude --plugin-dir plugins/staff plugin details staff`: 12 skills, 0 agents/hooks/MCP/LSP. Projected always-on cost is ~699 tokens per session. On-invoke costs: systematic-debugging ~3.3k, setup-matt-pocock-skills ~2.6k, code-review ~2.2k, to-tickets ~1.9k, verification-before-completion ~1.2k, tdd ~1.2k, to-spec ~1k, implement-spec ~960, grilling ~660, handoff ~260, implement ~180, grill-me under 20.
 - `claude plugin details plugins/staff` does not work because the plugin is not installed; the `--plugin-dir` form above was used.
 
+## Fetched at setup (not redistributed)
+
+| source repo | SHA | upstream path | sha256 | licence | fetched by | date |
+|---|---|---|---|---|---|---|
+| multica-ai/andrej-karpathy-skills | 2c606141936f1eeef17fa3043a72095b4765b9c2 | CLAUDE.md | 694a2d721e41c385f3db492838c23299826df5ba9809e3b0721aac70021e196a | no upstream licence: fetched by scripts/setup.sh, not copied into this repo | scripts/setup.sh step 9, to `~/.claude/CLAUDE.md` | 2026-11-25 |
+
 ## How to bump
 
 ```bash
