@@ -19,10 +19,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" merge --pr <n> --tier <tier
 
 ## defect
 
-Needs `--pr`. Ask for a short note if none was given.
+Needs `--pr`. Ask for a short note if none was given. Pass it in single quotes, writing any `'` in it as `'\''`.
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" defect --pr <n> --note "<note>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" defect --pr <n> --note '<note>'
 ```
 
 Run from the project repo (or pass `--repo-dir`). On success, echo the JSON line it prints. On a non-zero exit (gh failed, PR not merged), show the stderr message and tell the user nothing was recorded.
