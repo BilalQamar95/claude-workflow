@@ -18,7 +18,7 @@ Sources:
 | tdd | mattpocock/skills | d653911 | skills/engineering/tdd | 2026-11-25 | SKILL.md: "the `code-review` skill" -> "the `staff:code-review` skill" | agents/openai.yaml | Prompt-only; mocking.md and tests.md are example prose. OK. |
 | code-review | mattpocock/skills | d653911 | skills/engineering/code-review | 2026-11-25 | SKILL.md: `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills` | agents/openai.yaml | Prompt-only. Runs read-only git diff and rev-parse and spawns subagents. OK. |
 | setup-matt-pocock-skills | mattpocock/skills | d653911 | skills/engineering/setup-matt-pocock-skills | 2026-11-25 | none | agents/openai.yaml | Prompt-only plus doc templates. Mentions `gh`/`glab` commands and a GitLab docs URL as text; it can edit CLAUDE.md/AGENTS.md and create labels, but only after user confirmation. OK. |
-| systematic-debugging | obra/superpowers | 22f0b46 | skills/systematic-debugging | 2026-11-25 | SKILL.md: `superpowers:verification-before-completion` -> `staff:verification-before-completion` | find-polluter.sh, condition-based-waiting-example.ts | Read both files. find-polluter.sh only runs `find`, `ls` and `npm test <file>` on the cwd, with no network or writes; kept because root-cause-tracing.md refers to it. The .ts is an inert example whose only imports are type-only (`~/threads/...`, not resolvable here). Kept; neither is run automatically. OK. |
+| systematic-debugging | obra/superpowers | 22f0b46 | skills/systematic-debugging | 2026-11-25 | SKILL.md: `superpowers:verification-before-completion` -> `staff:verification-before-completion`; `superpowers:test-driven-development` -> `staff:tdd` | find-polluter.sh, condition-based-waiting-example.ts | Read both files. find-polluter.sh only runs `find`, `ls` and `npm test <file>` on the cwd, with no network or writes; kept because root-cause-tracing.md refers to it. The .ts is an inert example whose only imports are type-only (`~/threads/...`, not resolvable here). Kept; neither is run automatically. OK. |
 | verification-before-completion | obra/superpowers | 22f0b46 | skills/verification-before-completion | 2026-11-25 | none | none | Prompt-only. OK. |
 
 The `agents/openai.yaml` files are Codex UI metadata and are ignored by Claude Code. They were kept unmodified so a folder diff against upstream stays clean. Their `short_description` in implement-spec still says `/to-spec` and `/to-tickets` (not rewritten, since the file is unused).
@@ -44,7 +44,6 @@ All edits only rewrite references to skills vendored here to the `staff:` form. 
 
 References to skills not vendored here. Text is left as upstream wrote it.
 - tdd/SKILL.md:26: `Skill tool with "codebase-design"`. Calling it will fail or be ignored; the surrounding text says it is only a vocabulary reference.
-- systematic-debugging/SKILL.md:177: `superpowers:test-driven-development`.
 - setup-matt-pocock-skills/SKILL.md (lines 29, 53, 113 and others): the `triage` skill. It checks whether `triage` is installed; it is not, so Section B (triage labels) is skipped and triage-labels.md is not used.
 - setup-matt-pocock-skills/SKILL.md:40: lists `to-tickets`, `triage`, `to-spec` in prose (not an invocation, left as is).
 - setup-matt-pocock-skills/domain.md:11,45: `/domain-modeling`, `/grill-with-docs`, `/improve-codebase-architecture`.
