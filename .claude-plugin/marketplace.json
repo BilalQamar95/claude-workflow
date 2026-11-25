@@ -1,0 +1,14 @@
+{
+  "name": "claude-workflow",
+  "description": "Local marketplace for a staff-AI-engineer workflow.",
+  "owner": {
+    "name": "BilalQamar95"
+  },
+  "plugins": [
+    {
+      "name": "staff",
+      "source": "./plugins/staff",
+      "description": "Staff-AI-engineer workflow: tier router, metrics, vendored skills"
+    }
+  ]
+}
