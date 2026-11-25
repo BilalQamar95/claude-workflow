@@ -35,6 +35,7 @@ Make Claude Code a dependable daily driver for client work in week 1. Later stag
 - Auto permission mode stays as the user configured it.
 - Client code may later run in a restricted environment. Nothing in stage 1 may depend on a hosted service beyond Anthropic and GitHub.
 - Licences: Pocock is MIT and superpowers is MIT. Vendored copies keep their LICENSE file.
+- Nothing workflow-internal is committed to or published in a client repo: workflow files are listed in `.git/info/exclude`, PR bodies stay client-facing.
 
 ## Approaches considered (spine)
 
@@ -83,7 +84,7 @@ docs/                                  existing docs + specs
 - **Critical paths:** the router checks paths the task will touch against the `## Critical paths` globs in the project CLAUDE.md. The model may raise the tier but never lower it.
 - **trivial:** one file, no behaviour change, no critical path. Implement → run tests → bundled `/code-review low`.
 - **standard:** `to-spec` (local-markdown tracker, or GitHub if set up) → `implement` (uses `tdd` + Pocock `code-review`) → `verification-before-completion` → PR.
-- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → bundled `/code-review high` + `/security-review` + `/codex:adversarial-review` → PR. The packet lists the hunks in critical paths for the user to read.
+- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → bundled `/code-review high` + `/security-review` + `/codex:adversarial-review` → PR. The hunk list in critical paths is printed to the user's terminal, never put in the PR.
 - **Bugs:** `systematic-debugging` first. The regression test must fail before the fix.
 - **End of every tier:** remind the user to run `/staff:log` after merge.
 
@@ -134,7 +135,7 @@ Notes:
 - **`/staff:log` at merge appends:** `{date, repo, pr, tier, lead_time_h, review_min, escaped_defect: false}`.
   - `lead_time_h` is computed from git: first branch commit → merge.
   - `review_min` is asked from the user.
-- **`/staff:log --defect <pr>`** marks an escaped defect against the PR that introduced it.
+- **`/staff:log defect --pr <n>`** marks an escaped defect against the PR that introduced it.
 - **Agent cost, turns and minutes per session:** already in ponytail's local ledger (`~/.config/ponytail/band/<project>.csv`). We reuse it rather than duplicating it.
 
 ### Machine prerequisites

@@ -19,7 +19,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" merge --pr <n> --tier <tier
 
 ## defect
 
-Needs `--pr`. Ask for a short note if none was given. Pass it in single quotes, writing any `'` in it as `'\''`.
+Needs `--pr`. Ask for a short note if none was given. Pass it in single quotes, writing any `'` in it as `'\''` (`it's` → `'it'\''s'`).
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" defect --pr <n> --note '<note>'
