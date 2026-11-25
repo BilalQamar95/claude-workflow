@@ -2,6 +2,7 @@
 paths:
   - "app/models/**"
   - "app/repositories/**"
+  - "alembic/versions/**"
 ---
 # DB rules
 - One session per request. Never share a session across `asyncio.gather` tasks; open one per task.
