@@ -75,7 +75,9 @@ Let them edit before writing.
 
 **Pick the file to edit:**
 
-- If `CLAUDE.md` exists, edit it.
+- If `CLAUDE.local.md` exists or the user names it, edit it.
+- Never edit a git-tracked `CLAUDE.md`/`AGENTS.md` (check with `git ls-files --error-unmatch <file>`); create `CLAUDE.local.md` instead.
+- Else if `CLAUDE.md` exists, edit it.
 - Else if `AGENTS.md` exists, edit it.
 - If neither exists, ask the user which one to create; don't pick for them.
 

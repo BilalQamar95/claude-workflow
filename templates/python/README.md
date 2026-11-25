@@ -6,7 +6,9 @@ For FastAPI, SQLAlchemy and LangGraph projects. Setup, in order:
    ```bash
    cp -R <this-template-dir>/CLAUDE.md <this-template-dir>/.claude <client-repo>/
    cd <client-repo>
-   printf '%s\n' CLAUDE.md .claude/rules/ .claude/settings.json CLAUDE.local.md .scratch/ docs/agents/ >> "$(git rev-parse --git-common-dir)/info/exclude"
+   ex="$(git rev-parse --git-common-dir)/info/exclude"; mkdir -p "$(dirname "$ex")"
+   [ -z "$(tail -c1 "$ex" 2>/dev/null)" ] || echo >> "$ex"
+   for p in CLAUDE.md .claude/rules/ .claude/settings.json CLAUDE.local.md .scratch/ docs/agents/ GLOSSARY.md GLOSSARY-MAP.md docs/adr/; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
    ```
    Exclude only hides untracked files: if the client repo already tracks `CLAUDE.md` or `.claude/`, ask before overwriting.
 2. Install the official FastAPI skill: `uvx library-skills --claude`

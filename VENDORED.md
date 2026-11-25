@@ -17,7 +17,7 @@ Sources:
 | implement-spec | mattpocock/skills | d653911 | skills/engineering/implement-spec | 2026-11-25 | SKILL.md: description `/to-spec`, `/to-tickets` -> `/staff:to-spec`, `/staff:to-tickets`; body `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills`; `tdd` -> `staff:tdd`; `code-review` -> `staff:code-review` | agents/openai.yaml | Prompt-only. Spawns subagents and worktrees by instruction. OK. |
 | tdd | mattpocock/skills | d653911 | skills/engineering/tdd | 2026-11-25 | SKILL.md: "the `code-review` skill" -> "the `staff:code-review` skill" | agents/openai.yaml | Prompt-only; mocking.md and tests.md are example prose. OK. |
 | code-review | mattpocock/skills | d653911 | skills/engineering/code-review | 2026-11-25 | SKILL.md: `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills` | agents/openai.yaml | Prompt-only. Runs read-only git diff and rev-parse and spawns subagents. OK. |
-| setup-matt-pocock-skills | mattpocock/skills | d653911 | skills/engineering/setup-matt-pocock-skills | 2026-11-25 | none | agents/openai.yaml | Prompt-only plus doc templates. Mentions `gh`/`glab` commands and a GitLab docs URL as text; it can edit CLAUDE.md/AGENTS.md and create labels, but only after user confirmation. OK. |
+| setup-matt-pocock-skills | mattpocock/skills | d653911 | skills/engineering/setup-matt-pocock-skills | 2026-11-25 | SKILL.md step 4 "Pick the file to edit": added two rules first: edit `CLAUDE.local.md` if it exists or the user names it; never edit a git-tracked `CLAUDE.md`/`AGENTS.md` (`git ls-files --error-unmatch`), create `CLAUDE.local.md` instead | agents/openai.yaml | Prompt-only plus doc templates. Mentions `gh`/`glab` commands and a GitLab docs URL as text; it can edit CLAUDE.md/AGENTS.md and create labels, but only after user confirmation. OK. |
 | systematic-debugging | obra/superpowers | 22f0b46 | skills/systematic-debugging | 2026-11-25 | SKILL.md: `superpowers:verification-before-completion` -> `staff:verification-before-completion`; `superpowers:test-driven-development` -> `staff:tdd` | find-polluter.sh, condition-based-waiting-example.ts | Read both files. find-polluter.sh only runs `find`, `ls` and `npm test <file>` on the cwd, with no network or writes; kept because root-cause-tracing.md refers to it. The .ts is an inert example whose only imports are type-only (`~/threads/...`, not resolvable here). Kept; neither is run automatically. OK. |
 | verification-before-completion | obra/superpowers | 22f0b46 | skills/verification-before-completion | 2026-11-25 | none | none | Prompt-only. OK. |
 
@@ -38,7 +38,7 @@ No executables were deleted.
 
 ## Local edits (summary)
 
-All edits only rewrite references to skills vendored here to the `staff:` form. See the table for the per-file list. No other content was changed. The verification grep from the brief (Step 4) returns nothing.
+All edits only rewrite references to skills vendored here to the `staff:` form, except one: setup-matt-pocock-skills step 4 never edits a git-tracked `CLAUDE.md`/`AGENTS.md` and uses `CLAUDE.local.md` instead, so no workflow config is committed to client repos. See the table for the per-file list. No other content was changed. The verification grep from the brief (Step 4) returns nothing.
 
 ## Dangling references
 

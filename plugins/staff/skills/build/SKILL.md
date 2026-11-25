@@ -9,13 +9,13 @@ Task: $ARGUMENTS
 
 ## How to run a step
 
-- `staff:<name>`: read `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md` and follow it. The same applies when a skill you are following names another staff skill (e.g. implement → tdd, code-review; implement-spec → implement), even if it says to call the Skill tool: the Skill tool blocks staff skills that set `disable-model-invocation`, and reading the file always works. When you brief a subagent to run a staff skill, give it that file path.
+- `staff:<name>`: read `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md` and follow it. The same applies when a skill you are following names another staff skill (e.g. implement → tdd, code-review; implement-spec → implement), even if it says to call the Skill tool: the Skill tool blocks staff skills that set `disable-model-invocation`, and reading the file always works. When you brief a subagent to run a staff skill, give it that file path, the PR rule and the no-`git add` rule below.
 - `/code-review <level>`: the bundled Claude Code review, not `staff:code-review`. Call the Skill tool with `code-review`, args `<level>` (plus a target if the step gives one). `/security-review`: Skill tool, `security-review`. Wait for each result before fixing.
 - `/codex:adversarial-review`: user-only. Ask the user to run `/codex:adversarial-review --base <default branch>` and to tell you when its findings are in.
 - When a step asks for a review fixed point, use the default branch (usually `main`).
 - PR rule: every PR title and body is a plain, client-facing description of the change (what, why, how tested). Leave this workflow out: no tier, hunk list, metrics, labels or skill names. This covers every PR, including the draft PR `staff:implement-spec` opens and any PR another followed skill creates.
 - Project config: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `docs/agents/issue-tracker.md`, whichever exist. Read critical paths and the tracker config from them.
-- Client repos get no workflow files. The local-markdown tracker writes `.scratch/` (specs, tickets) and `docs/agents/` (tracker docs), and the tracker config goes in `CLAUDE.local.md`. Never `git add` these paths: commits contain only product code and tests.
+- Client repos get no workflow files. The local-markdown tracker writes `.scratch/` (specs, tickets) and `docs/agents/` (tracker docs), setup's domain docs are `GLOSSARY.md`, `GLOSSARY-MAP.md` and `docs/adr/`, and the tracker config goes in `CLAUDE.local.md`. Never `git add` these paths: commits contain only product code and tests.
 
 ## 1. Classify the tier
 
@@ -38,10 +38,15 @@ Standard and critical write workflow files, so first make sure git ignores them 
 
 ```bash
 ex="$(git rev-parse --git-common-dir)/info/exclude"; mkdir -p "$(dirname "$ex")"
-for p in .scratch/ docs/agents/ CLAUDE.local.md; do grep -qxF "$p" "$ex" || echo "$p" >> "$ex"; done
+[ -z "$(tail -c1 "$ex" 2>/dev/null)" ] || echo >> "$ex"
+for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
 ```
 
 They also need an issue tracker: an `## Agent skills` section in the project config, or `docs/agents/issue-tracker.md`. If neither exists, stop and tell the user to run `/staff:setup-matt-pocock-skills`, pick local markdown, and have it put the `## Agent skills` section in `CLAUDE.local.md` (not the committed `CLAUDE.md`). Then rerun `/staff:build`.
+
+On that rerun, if `git diff --name-only -- CLAUDE.md AGENTS.md` lists a file whose diff adds `## Agent skills`, setup edited a tracked file: stop and tell the user to move the block to `CLAUDE.local.md` and restore the tracked file.
+
+If the configured tracker is not local markdown, stop and ask: to-spec, to-tickets and implement-spec would publish specs, tickets, issues, labels and closing links to the client's tracker.
 
 Standard and critical work on a branch. If on the default branch, create one first.
 
