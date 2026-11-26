@@ -158,7 +158,8 @@ Notes:
 2. `staff_log.py` self-test passes (`python3 plugins/staff/scripts/staff_log.py --self-test`).
 3. In a fresh session, compare `/context` startup tokens with the pre-change number, recorded in this doc. The user agrees the budget is acceptable.
    - Pre-change baseline (2026-11-25, `claude -p "/context"` in an empty scratch dir, before `setup.sh`): 22k / 300k. Skills 10k, MCP server instructions 3.1k, system prompt 1.9k, custom agents 1.4k, memory files 875, MCP tools 671, messages 4k (deferred tools not counted in the 22k). Measured outside a project repo, so it excludes claude-mem's per-project injection there.
-   - Post-change: 21.5k / 300k in a neutral dir (vs the 22k baseline), and 27.5k in AgencyOS (includes its own CLAUDE.md). User sign-off: pending user.
+   - Post-change: 21.5k / 300k in a neutral dir (vs the 22k baseline), and 27.5k in AgencyOS (includes its own CLAUDE.md). User sign-off: accepted 2026-11-26.
 4. `/staff:build` appears and superpowers' bootstrap no longer injects. Caveman starts at lite.
 5. One real task runs end to end on the pilot repo through the standard tier, and a `/staff:log` line lands.
+   - Waived by the user on 2026-11-26. The AgencyOS pilot ran the critical tier end to end (stopped before push); there was no merge and no `/staff:log` line. The first real client task after `gh auth login` closes this check.
 6. `setup.sh` re-runs cleanly (idempotent) and leaves a backup of settings.json.
