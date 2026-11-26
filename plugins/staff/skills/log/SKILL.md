@@ -26,3 +26,5 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/staff_log.py" defect --pr <n> --note '<no
 ```
 
 Run from the project repo (or pass `--repo-dir`). On success, echo the JSON line it prints. On a non-zero exit (gh failed, PR not merged), show the stderr message and tell the user nothing was recorded.
+
+After a defect is recorded, offer to write a failing regression test for it with `staff:tdd` (read `${CLAUDE_PLUGIN_ROOT}/skills/tdd/SKILL.md` and follow it). The test must fail before any fix.
