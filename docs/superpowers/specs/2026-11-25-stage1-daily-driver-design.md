@@ -41,6 +41,13 @@ Deferred to stage 2 from the 2026-11-26 doc audit, so none of it is dropped sile
 - Stage 1a critic panel (BP:74-78): a panel of critic agents over the contract and review output; it belongs with the review workflow and verifier.
 - W24 caveman `--minimal` install: not built; caveman stays at default lite (setup merges the lite setting).
 
+Also deferred to stage 2 by the user during stage 1:
+
+- Reusable `skill-reviewer` and `hook-reviewer` agents, so every new skill, agent or hook gets a specialised write and review pass with a docs fact-check of its frontmatter.
+- `/staff:learn` auto-detection: an end-of-task retro and a weekly sweep that propose new skills or rules; created only on the user's approval, following the encoding ladder (test or type, lint or hook, path rule, CLAUDE.md line, skill). Extends S1.
+- A Django/DRF/Celery variant of the client-repo template (the AgencyOS stack).
+- Commit pinning for the already-installed third-party marketplaces through `extraKnownMarketplaces.<name>.source.ref`; today it is record-only in `VENDORED.md`.
+
 Skipped from the same audit, with the reason:
 
 - K1 BOM "skip ponytail's band": band is local-only (`~/.config/ponytail/band/`), so the BOM's concern does not apply and its ledger is used for cost.
