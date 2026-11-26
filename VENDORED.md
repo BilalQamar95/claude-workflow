@@ -5,6 +5,7 @@ Skills under `plugins/staff/skills/` copied from upstream repos at pinned commit
 Sources:
 - Pocock: https://github.com/mattpocock/skills @ `d65391149dbb5fe76478e76fa8d5122b2aa5a70e`
 - Superpowers: https://github.com/obra/superpowers @ `22f0b463e7a5e579904dd6211a520321035526f7`
+- Cursor: https://github.com/cursor/plugins @ `b1fbf4b60ac6813b4583ccc356850dafcf492665` (MIT licence from `cursor-team-kit/LICENSE`; the repo has no root LICENSE at this commit)
 
 | skill | source repo | SHA | upstream path | reviewed | local edits | non-md files | review verdict |
 |---|---|---|---|---|---|---|---|
@@ -15,17 +16,19 @@ Sources:
 | to-tickets | mattpocock/skills | d653911 | skills/engineering/to-tickets | 2026-11-25 | SKILL.md: `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills` (2 places) | agents/openai.yaml | Prompt-only. Publishes to the issue tracker, as stated. OK. |
 | implement | mattpocock/skills | d653911 | skills/engineering/implement | 2026-11-25 | SKILL.md: "tdd" -> "staff:tdd", "code-review" -> "staff:code-review" | agents/openai.yaml | Prompt-only. Tells the agent to commit to the current branch. OK. |
 | implement-spec | mattpocock/skills | d653911 | skills/engineering/implement-spec | 2026-11-25 | SKILL.md: description `/to-spec`, `/to-tickets` -> `/staff:to-spec`, `/staff:to-tickets`; body `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills`; `tdd` -> `staff:tdd`; `code-review` -> `staff:code-review` | agents/openai.yaml | Prompt-only. Spawns subagents and worktrees by instruction. OK. |
-| tdd | mattpocock/skills | d653911 | skills/engineering/tdd | 2026-11-25 | SKILL.md: "the `code-review` skill" -> "the `staff:code-review` skill" | agents/openai.yaml | Prompt-only; mocking.md and tests.md are example prose. OK. |
+| tdd | mattpocock/skills | d653911 | skills/engineering/tdd | 2026-11-25 | SKILL.md: "the `code-review` skill" -> "the `staff:code-review` skill"; `"codebase-design"` -> `"staff:codebase-design"` (2026-11-26) | agents/openai.yaml | Prompt-only; mocking.md and tests.md are example prose. OK. |
+| codebase-design | mattpocock/skills | d653911 | skills/engineering/codebase-design | 2026-11-26 | none | agents/openai.yaml | Prompt-only vocabulary reference. DESIGN-IT-TWICE.md tells the agent to spawn 3+ subagents when the user wants alternative interfaces. OK. |
 | code-review | mattpocock/skills | d653911 | skills/engineering/code-review | 2026-11-25 | SKILL.md: `/setup-matt-pocock-skills` -> `/staff:setup-matt-pocock-skills` | agents/openai.yaml | Prompt-only. Runs read-only git diff and rev-parse and spawns subagents. OK. |
 | setup-matt-pocock-skills | mattpocock/skills | d653911 | skills/engineering/setup-matt-pocock-skills | 2026-11-25 | SKILL.md step 4 "Pick the file to edit": added two rules first: edit `CLAUDE.local.md` if it exists or the user names it; never edit a git-tracked `CLAUDE.md`/`AGENTS.md` (`git ls-files --error-unmatch`), create `CLAUDE.local.md` instead | agents/openai.yaml | Prompt-only plus doc templates. Mentions `gh`/`glab` commands and a GitLab docs URL as text; it can edit CLAUDE.md/AGENTS.md and create labels, but only after user confirmation. OK. |
 | systematic-debugging | obra/superpowers | 22f0b46 | skills/systematic-debugging | 2026-11-25 | SKILL.md: `superpowers:verification-before-completion` -> `staff:verification-before-completion`; `superpowers:test-driven-development` -> `staff:tdd` | find-polluter.sh, condition-based-waiting-example.ts | Read both files. find-polluter.sh only runs `find`, `ls` and `npm test <file>` on the cwd, with no network or writes; kept because root-cause-tracing.md refers to it. The .ts is an inert example whose only imports are type-only (`~/threads/...`, not resolvable here). Kept; neither is run automatically. OK. |
 | verification-before-completion | obra/superpowers | 22f0b46 | skills/verification-before-completion | 2026-11-25 | none | none | Prompt-only. OK. |
+| thermo-nuclear-code-quality-review | cursor/plugins | b1fbf4b | cursor-team-kit/skills/thermo-nuclear-code-quality-review | 2026-11-26 | none | none | Prompt-only, no tool names, network or exec; `disable-model-invocation: true`. Demands restructuring beyond the diff; build/reviews.md limits that to the user's OK. OK. |
 
-The `agents/openai.yaml` files are Codex UI metadata and are ignored by Claude Code. They were kept unmodified so a folder diff against upstream stays clean. Their `short_description` in implement-spec still says `/to-spec` and `/to-tickets` (not rewritten, since the file is unused).
+The `agents/openai.yaml` files are Codex UI metadata and are ignored by Claude Code. They were kept unmodified so a folder diff against upstream stays clean. There are 11, one per Pocock skill. Their `short_description` in implement-spec still says `/to-spec` and `/to-tickets` (not rewritten, since the file is unused).
 
 ## Grep review
 
-`find plugins/staff/skills -type f ! -name '*.md'` returns the 2 systematic-debugging files and the 10 openai.yaml files listed above.
+`find plugins/staff/skills -type f ! -name '*.md'` returns the 2 systematic-debugging files and the 11 openai.yaml files listed above.
 
 `grep -rnE 'curl|wget|https?://|eval|exec' plugins/staff/skills` hits, all benign:
 - `condition-based-waiting-example.ts:158`: "execution" in a comment.
@@ -33,6 +36,7 @@ The `agents/openai.yaml` files are Codex UI metadata and are ignored by Claude C
 - `root-cause-tracing.md:42,81`: `execFileAsync('git', ['init'])` in example snippets for the debugging write-up.
 - `setup-matt-pocock-skills/SKILL.md:45`, `issue-tracker-gitlab.md:3`: link to https://gitlab.com/gitlab-org/cli (docs link for the `glab` CLI).
 - `triage-labels.md:7`: "needs-triage" matched "eval" in "evaluate".
+- `thermo-nuclear-code-quality-review/SKILL.md:108`: "execution" in prose.
 
 No executables were deleted.
 
@@ -43,16 +47,15 @@ All edits only rewrite references to skills vendored here to the `staff:` form, 
 ## Dangling references
 
 References to skills not vendored here. Text is left as upstream wrote it.
-- tdd/SKILL.md:26: `Skill tool with "codebase-design"`. Calling it will fail or be ignored; the surrounding text says it is only a vocabulary reference.
 - setup-matt-pocock-skills/SKILL.md (lines 29, 53, 113 and others): the `triage` skill. It checks whether `triage` is installed; it is not, so Section B (triage labels) is skipped and triage-labels.md is not used.
 - setup-matt-pocock-skills/SKILL.md:40: lists `to-tickets`, `triage`, `to-spec` in prose (not an invocation, left as is).
 - setup-matt-pocock-skills/domain.md:11,45: `/domain-modeling`, `/grill-with-docs`, `/improve-codebase-architecture`.
 - setup-matt-pocock-skills/issue-tracker-{github,gitlab,local}.md: `/triage`, `/wayfinder`.
 
-## Plugin checks (2026-11-25)
+## Plugin checks (2026-11-26)
 
-- `claude plugin validate plugins/staff`: passed with one warning (no plugin icon; ICON_MISSING). The warning is directory-submission only.
-- `claude --plugin-dir plugins/staff plugin details staff`: 14 skills (staff 0.2.0), 0 agents/hooks/MCP/LSP. Projected always-on cost is ~775 tokens per session. On-invoke costs: systematic-debugging ~3.3k, setup-matt-pocock-skills ~2.6k, code-review ~2.2k, to-tickets ~1.9k, verification-before-completion ~1.2k, tdd ~1.2k, to-spec ~1k, implement-spec ~960, grilling ~660, handoff ~260, implement ~180, grill-me under 20; plus staff-authored build ~1.8k and log ~300.
+- `claude plugin validate --strict plugins/staff`: passed. The ICON_MISSING note is a directory-submission check and does not affect the result.
+- `claude --plugin-dir plugins/staff plugin details staff`: 16 skills (staff 0.3.0), 0 agents/hooks/MCP/LSP. Projected always-on cost is ~968 tokens per session. On-invoke costs: thermo-nuclear-code-quality-review ~4.3k, systematic-debugging ~3.3k, setup-matt-pocock-skills ~2.6k, code-review ~2.2k, codebase-design ~2k, to-tickets ~2k, verification-before-completion ~1.2k, tdd ~1.2k, to-spec ~1k, implement-spec ~960, grilling ~660, handoff ~260, implement ~180, grill-me under 20; plus staff-authored build ~2.1k (reviews.md is read on top when a tier reaches its reviews) and log ~360.
 - `claude plugin details plugins/staff` does not work because the plugin is not installed; the `--plugin-dir` form above was used.
 
 ## Fetched at setup (not redistributed)
@@ -69,13 +72,15 @@ git clone https://github.com/mattpocock/skills
 git -C skills checkout <new-sha>
 git clone https://github.com/obra/superpowers
 git -C superpowers checkout <new-sha>
+git clone https://github.com/cursor/plugins cursor-plugins
+git -C cursor-plugins checkout <new-sha>
 ```
 
 Then:
 1. Diff each upstream folder against `plugins/staff/skills/<name>/` and read every changed file in full.
 2. Re-run the greps in the "Grep review" section, and the cross-reference grep for `staff:` references.
 3. Re-apply the local edits listed above, update the SHA and reviewed columns, and refresh the dangling-reference list.
-4. Run `claude plugin validate plugins/staff` and `claude --plugin-dir plugins/staff plugin details staff`.
+4. Run `claude plugin validate --strict plugins/staff` and `claude --plugin-dir plugins/staff plugin details staff`.
 
 ## Machine plugins
 
