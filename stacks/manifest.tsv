@@ -1,0 +1,22 @@
+# Per-repo stack skills for scripts/stack.sh. One row per technology, tab-separated:
+# id	detect	kind	source	items	default	notes
+# detect: extended regex, case-insensitive, matched against the repo's dependency files (names as "file: <name>", then contents).
+# kind: skills = cherry-picked with the skills CLI into .claude/skills/, source owner/repo@<commit>;
+#       plugin = marketplace plugin enabled at local scope, source owner/repo#<commit>;
+#       synced = claude.ai-synced plugin (off user-wide by setup.sh) turned on in .claude/settings.local.json;
+#       library-skills = skills that ship inside installed packages (tiangolo/library-skills).
+# default: y = official or vendor source, offered as [Y/n]; n = community source, offered as [y/N]; read the skill text first.
+# Commits recorded 2026-11-26 (git ls-remote HEAD). Bump deliberately, after reading the upstream diff.
+pydantic	pydantic	skills	pydantic/skills@06d0f39341721a983bd6ac931e3629d2006ed70d	pydantic	y	Official (Pydantic). Logfire plugin skipped: hosted MCP and telemetry capture.
+pydantic-ai	pydantic[-_]ai	skills	pydantic/skills@06d0f39341721a983bd6ac931e3629d2006ed70d	building-pydantic-ai-agents	y	Official. The eight migrate-to-pydantic-ai skills are left out.
+langchain	langchain|langgraph|langsmith	plugin	langchain-ai/langchain-skills#9002566fcf20fb3df65f42da4d316f5643f71c9e	langchain-skills@langchain-skills	y	Official (LangChain); LangGraph via langchain-build-agent, LangSmith via the tracing skills. Bundles two read-only docs MCPs (docs.langchain.com, reference.langchain.com).
+langfuse	langfuse	synced	-	langfuse@synced	y	Official (Langfuse), synced from claude.ai. Skill fetches Langfuse docs over the network.
+qdrant	qdrant	synced	-	qdrant@synced	y	Official (Qdrant), synced from claude.ai. Manual only, if ever: mcp-server-qdrant with QDRANT_READ_ONLY=true.
+neo4j	neo4j	skills	neo4j-contrib/neo4j-skills@f824ec719667283b6fcbe9a670573a8c0ec1a7b3	neo4j-cypher-skill,neo4j-modeling-skill,neo4j-graphrag-skill,neo4j-query-tuning-skill,neo4j-driver-python-skill	y	Neo4j devrel (neo4j-contrib org). 5 of 30; neo4j-mcp-skill skipped (flagged for fetching remote code). Manual only, if ever: neo4j-mcp-server with NEO4J_MCP_READ_ONLY=true, NEO4J_MCP_TELEMETRY=false and a read-only DB user.
+docker	file: (docker-)?compose[^ ]*\.ya?ml|file: dockerfile	skills	docker/skills@fbcef37a595f1e0cc992524e31360b25f936706f	docker-build-strategies,docker-compose-patterns,docker-destructive-guardrails	y	Official (Docker). Cherry-picked so the plugin's remote docs MCP is not registered.
+redis	redis	skills	redis/agent-skills@74708dab4b3f81a9845803c3f642a4f7d443af69	redis-core,redis-connections,redis-security	y	Official (Redis), the broker/cache subset of redis-development. No MCP: the plugin's docs MCP and mcp-redis are skipped.
+django	django	skills	vintasoftware/django-ai-plugins@b8af2688d994747666e6a793d441365807d6772f	django-expert,django-celery-expert,cdrf-expert,django-safe-migration	n	Community (Vinta Software, MIT). Covers Django, DRF and Celery. Review the skill text first.
+django-review	django	skills	getsentry/skills@a582c51ee29d0f35e6ac321340796f77d43da733	django-perf-review,django-access-review	y	Sentry (Apache-2.0). Two audit skills from a 31-skill repo.
+postgres	psycopg|asyncpg|pgvector|postgres	skills	timescale/pg-aiguide@1aef6e452b97fae580d57677a807fd0d601ddc7b	design-postgres-tables,pgvector-semantic-search	y	Timescale (Apache-2.0). Skills only; its hosted docs MCP is not installed. Chosen over supabase-postgres-best-practices for the pgvector skill.
+deepeval	deepeval	skills	confident-ai/deepeval@443135ed2756a454856840dc9357b5c9dd32b9fa	deepeval,deepeval-tracing	n	Vendor (Confident AI). May point at the Confident AI cloud; inspect first.
+fastapi	fastapi|streamlit	library-skills	library-skills@0.0.21	-	y	Skills ship inside the installed package (FastAPI, Streamlit), so install the repo's dependencies first.
