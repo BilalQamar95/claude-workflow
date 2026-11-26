@@ -1,6 +1,6 @@
 # Staff-AI-engineer workflow — goal
 
-Approved 2026-11-25. Inputs: `docs/AI WORKFLOW/` (blueprint, bill of materials, knowledge traceability, ship checklist), treated as suggestions, not a spec.
+Approved 2026-11-25. Inputs: four planning docs kept outside this repo (blueprint, bill of materials, knowledge traceability, ship checklist), treated as suggestions, not a spec.
 
 ## Goal (~6 weeks)
 
