@@ -10,7 +10,7 @@ For FastAPI, SQLAlchemy and LangGraph projects. Setup, in order:
    [ -z "$(tail -c1 "$ex" 2>/dev/null)" ] || echo >> "$ex"
    for p in CLAUDE.md .claude/rules/ .claude/settings.json CLAUDE.local.md .scratch/ docs/agents/ GLOSSARY.md GLOSSARY-MAP.md docs/adr/; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
    ```
-   Exclude only hides untracked files: if the client repo already tracks `CLAUDE.md` or `.claude/`, ask before overwriting.
+   Exclude only hides untracked files: if the client repo already tracks `CLAUDE.md` or `.claude/`, ask before overwriting. `docs/adr/` and `GLOSSARY.md` are excluded too: if the client repo already tracks its own ADRs or glossary there, tracked files are unaffected, but new hand-written ADRs there won't show in `git status`, so check before excluding.
 2. Install the official FastAPI skill: `uvx library-skills --claude`
 3. Install langchain-skills (upstream: `langchain-ai/langchain-skills`) pinned to a commit. The upstream installs from its default branch, so pin through a local checkout used as the marketplace source:
    ```bash
@@ -22,5 +22,7 @@ For FastAPI, SQLAlchemy and LangGraph projects. Setup, in order:
    Pinned SHA: `9002566fcf20fb3df65f42da4d316f5643f71c9e` (upstream HEAD on 2026-11-24). Leave auto-update off. Bump the SHA deliberately.
 4. In Claude Code, run `/staff:setup-matt-pocock-skills` and pick the local-markdown tracker. Have it write the `## Agent skills` section into `CLAUDE.local.md` (not `CLAUDE.md`); do not write it by hand.
 5. Fill in Commands, Map and Critical paths in `CLAUDE.md`. Keep it at or under 120 lines.
+
+In a git worktree, create the worktree's own virtualenv; do not reuse the main tree's `.venv`, because an editable install there imports main-tree code.
 
 Then start work with `/staff:build <task>`.

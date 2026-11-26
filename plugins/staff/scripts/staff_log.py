@@ -2,6 +2,7 @@
 """Append /staff:log metrics to a local JSONL file (never inside a repo)."""
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -18,6 +19,12 @@ def lead_time_hours(pr):
         raise ValueError("PR not merged")
     starts = [c["authoredDate"] for c in pr.get("commits") or []] or [pr["createdAt"]]
     return (_ts(pr["mergedAt"]) - min(map(_ts, starts))).total_seconds() / 3600
+
+
+def merge_record(pr, repo, num, tier, review_min):
+    return {"date": pr["mergedAt"][:10], "repo": repo, "pr": num, "tier": tier,
+            "lead_time_h": round(lead_time_hours(pr), 2), "review_min": review_min,
+            "escaped_defect": False}
 
 
 def append_record(record, path):
@@ -45,14 +52,14 @@ def main(argv):
     for sp in (m, d):
         sp.add_argument("--repo-dir", default=".")
     a = ap.parse_args(argv)
+    if a.cmd == "merge" and not (math.isfinite(a.review_min) and a.review_min >= 0):
+        ap.error("--review-min must be a finite number >= 0")
     path = Path(os.environ.get("STAFF_METRICS") or Path.home() / ".local/share/staff/metrics.jsonl")
     try:
         repo = _gh(["repo", "view", "--json", "nameWithOwner"], a.repo_dir)["nameWithOwner"]
         if a.cmd == "merge":
             pr = _gh(["pr", "view", str(a.pr), "--json", "number,createdAt,mergedAt,commits"], a.repo_dir)
-            rec = {"date": date.today().isoformat(), "repo": repo, "pr": a.pr, "tier": a.tier,
-                   "lead_time_h": round(lead_time_hours(pr), 2), "review_min": a.review_min,
-                   "escaped_defect": False}
+            rec = merge_record(pr, repo, a.pr, a.tier, a.review_min)
         else:
             rec = {"date": date.today().isoformat(), "repo": repo, "pr": a.pr,
                    "escaped_defect": True, "note": a.note}
@@ -84,6 +91,15 @@ def self_test():
         append_record({"b": 2}, p)
         lines = p.read_text().splitlines()
         assert len(lines) == 2 and all(isinstance(json.loads(l), dict) for l in lines)
+    # --review-min validation (argparse exits 2 via ap.error)
+    for bad in ("nan", "inf", "-1"):
+        try:
+            main(["merge", "--pr", "1", "--tier", "trivial", "--review-min", bad])
+            raise AssertionError("expected SystemExit")
+        except SystemExit as e:
+            assert e.code == 2, bad
+    # merge date comes from mergedAt, not today
+    assert merge_record(two, "o/r", 1, "trivial", 5)["date"] == "2026-11-21"
     print("self-test ok")
 
 

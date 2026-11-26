@@ -1,6 +1,6 @@
 # Stage 1 — week-1 daily driver: design
 
-Status: approved 2026-11-25 · Pilot repo: new small FastAPI + SQLAlchemy + LangGraph repo scaffolded from `templates/python/` (also the stage-2 gate testbed) · Goal: [2026-11-25-staff-workflow-goal.md](2026-11-25-staff-workflow-goal.md)
+Status: approved 2026-11-25 · Pilot repo: AgencyOS (Django/DRF/Celery/LangGraph), worked in a git worktree; the new FastAPI pilot repo was dropped · Goal: [2026-11-25-staff-workflow-goal.md](2026-11-25-staff-workflow-goal.md)
 
 ## Intent
 
@@ -83,8 +83,8 @@ docs/                                  existing docs + specs
 
 - **Critical paths:** the router checks paths the task will touch against the `## Critical paths` globs in the project CLAUDE.md. The model may raise the tier but never lower it.
 - **trivial:** one file, no behaviour change, no critical path. Implement → run tests → bundled `/code-review low`.
-- **standard:** `to-spec` (local-markdown tracker, or GitHub if set up) → `implement` (uses `tdd` + Pocock `code-review`) → `verification-before-completion` → PR.
-- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → bundled `/code-review high` + `/security-review` + `/codex:adversarial-review` → PR. The hunk list in critical paths is printed to the user's terminal, never put in the PR.
+- **standard:** `to-spec` (local-markdown tracker only; the GitHub tracker was dropped) → `implement` (uses `tdd` + Pocock `code-review`) → `verification-before-completion` → PR.
+- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → bundled `/code-review high` + `/security-review` + `/codex:adversarial-review` → PR. The hunk list in critical paths is printed to the terminal, never put in the PR.
 - **Bugs:** `systematic-debugging` first. The regression test must fail before the fix.
 - **End of every tier:** remind the user to run `/staff:log` after merge.
 
@@ -106,7 +106,9 @@ Notes:
 
 - `autoUpdatesChannel`: `latest` → `stable`.
 - `env.CAVEMAN_DEFAULT_MODE = "lite"`.
-- claude-mem startup injection: off for workflow-managed repos, using its `CLAUDE_MEM_*` context/exclusion settings. The builder checks the exact key in claude-mem 16.1.5. Telemetry consent is set to declined.
+- claude-mem startup injection is off globally: `CLAUDE_MEM_CONTEXT_OBSERVATIONS="0"`, `CLAUDE_MEM_CONTEXT_SESSION_COUNT="0"`, `CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY="false"`. Capture stays on. `telemetry.json` has `enabled=false`.
+- `env.DISABLE_TELEMETRY="1"` and `env.DISABLE_ERROR_REPORTING="1"`.
+- `setup.sh` also installs the Karpathy CLAUDE.md to `~/.claude/CLAUDE.md` (pinned SHA and sha256), only if the file is missing, and warns if an existing one differs.
 - `enabledPlugins` updated as in the table above.
 - Third-party marketplaces (caveman, ponytail, claude-mem, codex) are pinned to a commit if the marketplace source supports a ref. If not, record the installed version in `VENDORED.md` and re-check on bump.
 
@@ -156,6 +158,7 @@ Notes:
 2. `staff_log.py` self-test passes (`python3 plugins/staff/scripts/staff_log.py --self-test`).
 3. In a fresh session, compare `/context` startup tokens with the pre-change number, recorded in this doc. The user agrees the budget is acceptable.
    - Pre-change baseline (2026-11-25, `claude -p "/context"` in an empty scratch dir, before `setup.sh`): 22k / 300k. Skills 10k, MCP server instructions 3.1k, system prompt 1.9k, custom agents 1.4k, memory files 875, MCP tools 671, messages 4k (deferred tools not counted in the 22k). Measured outside a project repo, so it excludes claude-mem's per-project injection there.
+   - Post-change: 21.5k / 300k in a neutral dir (vs the 22k baseline), and 27.5k in AgencyOS (includes its own CLAUDE.md). User sign-off: pending user.
 4. `/staff:build` appears and superpowers' bootstrap no longer injects. Caveman starts at lite.
 5. One real task runs end to end on the pilot repo through the standard tier, and a `/staff:log` line lands.
 6. `setup.sh` re-runs cleanly (idempotent) and leaves a backup of settings.json.

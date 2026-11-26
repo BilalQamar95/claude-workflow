@@ -42,13 +42,15 @@ ex="$(git rev-parse --git-common-dir)/info/exclude"; mkdir -p "$(dirname "$ex")"
 for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
 ```
 
+`docs/adr/` and `GLOSSARY.md` are excluded. If the client repo already tracks its own ADRs or glossary there, tracked files are unaffected, but new hand-written ADRs there won't show in `git status`: check before excluding.
+
 They also need an issue tracker: an `## Agent skills` section in the project config, or `docs/agents/issue-tracker.md`. If neither exists, stop and tell the user to run `/staff:setup-matt-pocock-skills`, pick local markdown, and have it put the `## Agent skills` section in `CLAUDE.local.md` (not the committed `CLAUDE.md`). Then rerun `/staff:build`.
 
 On that rerun, if `git diff --name-only -- CLAUDE.md AGENTS.md` lists a file whose diff adds `## Agent skills`, setup edited a tracked file: stop and tell the user to move the block to `CLAUDE.local.md` and restore the tracked file.
 
 If the configured tracker is not local markdown, stop and ask: to-spec, to-tickets and implement-spec would publish specs, tickets, issues, labels and closing links to the client's tracker.
 
-Standard and critical work on a branch. If on the default branch, create one first.
+Standard and critical work on a branch. If on the default branch, create one first. If you start services (docker compose, dev servers), say so and stop them at the end unless the user asks to keep them.
 
 ### trivial
 
@@ -65,7 +67,7 @@ Standard and critical work on a branch. If on the default branch, create one fir
 
 ### critical
 
-1. `staff:grill-me`
+1. `staff:grill-me`. It needs the user's answers: never answer your own questions. With no user available (e.g. headless), stop and say so.
 2. `staff:to-spec`
 3. `staff:to-tickets`
 4. `staff:implement-spec`

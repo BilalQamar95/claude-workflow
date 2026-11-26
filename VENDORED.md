@@ -52,7 +52,7 @@ References to skills not vendored here. Text is left as upstream wrote it.
 ## Plugin checks (2026-11-25)
 
 - `claude plugin validate plugins/staff`: passed with one warning (no plugin icon; ICON_MISSING). The warning is directory-submission only.
-- `claude --plugin-dir plugins/staff plugin details staff`: 12 skills, 0 agents/hooks/MCP/LSP. Projected always-on cost is ~699 tokens per session. On-invoke costs: systematic-debugging ~3.3k, setup-matt-pocock-skills ~2.6k, code-review ~2.2k, to-tickets ~1.9k, verification-before-completion ~1.2k, tdd ~1.2k, to-spec ~1k, implement-spec ~960, grilling ~660, handoff ~260, implement ~180, grill-me under 20.
+- `claude --plugin-dir plugins/staff plugin details staff`: 14 skills (staff 0.2.0), 0 agents/hooks/MCP/LSP. Projected always-on cost is ~775 tokens per session. On-invoke costs: systematic-debugging ~3.3k, setup-matt-pocock-skills ~2.6k, code-review ~2.2k, to-tickets ~1.9k, verification-before-completion ~1.2k, tdd ~1.2k, to-spec ~1k, implement-spec ~960, grilling ~660, handoff ~260, implement ~180, grill-me under 20; plus staff-authored build ~1.8k and log ~300.
 - `claude plugin details plugins/staff` does not work because the plugin is not installed; the `--plugin-dir` form above was used.
 
 ## Fetched at setup (not redistributed)

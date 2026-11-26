@@ -29,10 +29,17 @@ jq_write() {
 }
 
 # 1. Prerequisites.
-for c in jq claude uv brew; do
+# The installed plugin runs from this checkout, so a feature branch or dirty tree here is live in client sessions.
+repo_branch=$(git -C $REPO_ROOT branch --show-current 2>/dev/null || true)
+repo_dirty=$(git -C $REPO_ROOT status --porcelain 2>/dev/null || true)
+if [[ $repo_branch != main || -n $repo_dirty ]]; then
+  print -u2 "warning: staff plugin is registered from $REPO_ROOT on branch ${repo_branch:-detached}${repo_dirty:+ (dirty)}; client sessions will run this checkout"
+fi
+for c in jq claude uv; do
   command -v $c >/dev/null || { print -u2 "missing prerequisite: $c"; exit 1; }
 done
 if ! command -v gh >/dev/null; then
+  command -v brew >/dev/null || { print -u2 "missing prerequisite: gh (and brew to install it); install gh from https://cli.github.com, then re-run"; exit 1; }
   brew install gh
   changed+=("installed gh")
   print "run: gh auth login"
@@ -51,10 +58,10 @@ fi
 # 2. Backup (every run, unique name, so each run is recoverable).
 backup $SETTINGS
 
-# 3. Settings merge (update channel, caveman lite, Claude Code telemetry off). Skip the write when values already match, so re-runs leave the file byte-identical.
-if ! jq -e '.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite" and .env.DISABLE_TELEMETRY == "1"' $SETTINGS >/dev/null; then
-  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite" | .env.DISABLE_TELEMETRY = "1"'
-  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE, env.DISABLE_TELEMETRY")
+# 3. Settings merge (update channel, caveman lite, Claude Code telemetry and error reporting off). Skip the write when values already match, so re-runs leave the file byte-identical.
+if ! jq -e '.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite" and .env.DISABLE_TELEMETRY == "1" and .env.DISABLE_ERROR_REPORTING == "1"' $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite" | .env.DISABLE_TELEMETRY = "1" | .env.DISABLE_ERROR_REPORTING = "1"'
+  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE, env.DISABLE_TELEMETRY, env.DISABLE_ERROR_REPORTING")
 fi
 
 # 4. Local marketplace (name comes from .claude-plugin/marketplace.json).
