@@ -63,6 +63,7 @@ References to skills not vendored here. Text is left as upstream wrote it.
 | source repo | SHA | upstream path | sha256 | licence | fetched by | date |
 |---|---|---|---|---|---|---|
 | multica-ai/andrej-karpathy-skills | 2c606141936f1eeef17fa3043a72095b4765b9c2 | CLAUDE.md | 694a2d721e41c385f3db492838c23299826df5ba9809e3b0721aac70021e196a | no upstream licence: fetched by scripts/setup.sh, not copied into this repo | scripts/setup.sh step 9, to `~/.claude/CLAUDE.md` | 2026-11-25 |
+| gitleaks/gitleaks | release v8.30.1 | gitleaks_8.30.1_darwin_x64.tar.gz / _darwin_arm64.tar.gz | x64 dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709, arm64 b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 (from the release checksums file; the x64 download matched) | MIT, binary installed, not copied into this repo | scripts/setup.sh step 8b, to `~/.local/bin/gitleaks`, only when Homebrew has no bottle | 2026-11-26 |
 
 ## How to bump
 
@@ -94,4 +95,15 @@ Third-party marketplace plugins installed on this machine, recorded 2026-11-25 (
 | openai-codex (openai/codex-plugin-cc) | codex | 1.0.6 | db52e28f4d9ded852ab3942cea316258ae4ef346 | db52e28f4d9ded852ab3942cea316258ae4ef346 | 2026-11-25 |
 | cc-marketplace (kenryu42/cc-marketplace) | safety-net | 0.8.2 | a8acf4db1c0d73964b51be6c4c125def2443da5d | ca75085158a57cd620d57385f9560cab936e38fa | 2026-11-25 |
 
-Pinning by SHA is possible via settings `extraKnownMarketplaces.<name>.source.ref` (Claude Code ≥2.1.324); deferred to stage 2 because re-registering uninstalls plugins.
+Added by scripts/setup.sh in stage 1, recorded 2026-11-26 from the marketplace catalogs (not yet installed on this machine when recorded):
+
+| marketplace | plugin | version | pinned commit | date |
+|---|---|---|---|---|
+| claude-plugins-official | claude-security | 0.13.1 | none: official marketplace, not a git checkout here; auto-updates with the official catalog | 2026-11-26 |
+| trailofbits (trailofbits/skills) | sharp-edges | 1.1.3 | 149d7b21f4067765b82e67029730b42d228ef4b4 (`marketplace add trailofbits/skills#<sha>`) | 2026-11-26 |
+| trailofbits (trailofbits/skills) | supply-chain-risk-auditor | 2.0.4 | 149d7b21f4067765b82e67029730b42d228ef4b4 | 2026-11-26 |
+| trailofbits (trailofbits/skills) | insecure-defaults | 2.0.3 | 149d7b21f4067765b82e67029730b42d228ef4b4 | 2026-11-26 |
+
+The Trail of Bits repo is CC BY-SA 4.0, so its plugins are installed from the pinned marketplace, never copied here. Per-repo stack skills and plugins (langchain-skills, pydantic, neo4j, docker, redis and others) are pinned in `stacks/manifest.tsv` and installed by `scripts/stack.sh` at local scope.
+
+Pinning the older marketplaces above by SHA is possible via settings `extraKnownMarketplaces.<name>.source.ref` (Claude Code ≥2.1.324); deferred to stage 2 because re-registering uninstalls plugins.

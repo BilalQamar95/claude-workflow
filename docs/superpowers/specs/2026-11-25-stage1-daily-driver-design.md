@@ -20,8 +20,33 @@ Make Claude Code a dependable daily driver for client work in week 1. Later stag
 - Contract, locked tests, `staff-gate`, evidence packet, review workflow with verifier. Those are stage 2+.
 - hookify rule pack and semgrep rules. They come with the gate.
 - `.ai/` knowledge base, trace tooling, `doctor`.
-- Trail of Bits skills, claude-security, the cloudflare audit, Graphify. Each gets added when a stage or repo needs it.
+- The cloudflare security audit and Graphify. Each gets added when a stage or repo needs it. (Trail of Bits plugins, claude-security and gitleaks moved into stage 1 with the review steps; see Plugin set.)
+- The Claude Code sandbox (`sandbox.enabled`, audit W9). User decision 2026-11-26: it moves to stage 2, with the gate, so network and out-of-project writes are enforced together with the other gate checks.
 - The BOM's baseline A/B fixture repo. Real-task metrics replace it for now.
+- The 383-item ship checklist. It is adopted incrementally per stage, not up front. Stage 2 owns the review-relevant subset, scoped by tags and fed into the review workflow; later stages take the rest.
+
+Deferred to stage 2 from the 2026-11-26 doc audit, so none of it is dropped silently:
+
+- S1 `/staff:learn` loop (regression test, then a hookify, semgrep or ruff rule with a proof test, a rules line last): it needs the gate to land rules into.
+- S2 agentic production-failure skill and the six-question workflow-vs-agent rule: custom knowledge, written after the pilot shows which failures recur.
+- S3 eval scaffolding for LLM behaviour changes: langchain-skills `eval-engineering`, DeepEval and the langfuse skill are installable per repo through `stacks/manifest.tsv`; wiring them into the gate is stage 2.
+- S4 PostToolUse ruff format and check hook: only safe when the repo has its own ruff config, which the gate's `quality.toml` will say.
+- S5 `/staff:init` interview (the D-list and A-list defaults): the template README is filled in by hand until then.
+- S6 ADRs and glossary (Pocock `domain-modeling`, `grill-with-docs`): vendored with the contract work that consumes them.
+- S7 plugin evals: low value while every staff-authored skill is user-invoked.
+- S8 CI for this repo (`claude plugin validate --strict`, the self-tests): about 15 lines of YAML, once the plugin changes less often.
+- S9 automated re-scan of vendored skills in CI: comes with S8.
+- S10 `plugin-dev` toolkit: needed once hooks and agents are built.
+- S11 hook latency: measure once with `--debug` hook timings when the gate adds hooks.
+
+Skipped from the same audit, with the reason:
+
+- K1 BOM "skip ponytail's band": band is local-only (`~/.config/ponytail/band/`), so the BOM's concern does not apply and its ledger is used for cost.
+- K2 bundled `/verify`: not in this install; `verification-before-completion` covers it.
+- K3 security-guidance as a plugin.json dependency: it is already enabled user-wide.
+- K4 lint, type, layering config and git conventions: the client owns these in client repos, and writing them would put workflow config in client PRs; own repos get them in stage 2 through `quality.toml`.
+- K5 Pocock `writing-for-agents`, `prototype`, `research`: skill-creator and claude-md-management cover writing, exa, firecrawl and context7 cover research, and nothing needs prototype yet.
+- K6 observability standards (health and readiness, OTel, dashboards): product decisions per client that belong to the ship checklist.
 
 ## Anti-goals
 
@@ -60,7 +85,9 @@ plugins/staff/
   scripts/staff_log.py                 appends metrics JSONL; has an assert self-test
 VENDORED.md                            per skill: source repo, commit SHA, path, review date, local edits
 scripts/setup.sh                       idempotent machine setup (settings merge, plugin toggles, checks)
-templates/python/                      CLAUDE.md, .claude/rules/{api,db,agents,tests}.md, .claude/settings.json
+scripts/stack.sh                       per-repo stack skills at local scope (has --dry-run and --self-test)
+stacks/manifest.tsv                    dependency pattern -> pinned skill or plugin source
+templates/python/                      CLAUDE.md, .claude/rules/{api,db,agents,tests,workers}.md, .claude/settings.json
 docs/                                  existing docs + specs
 ```
 
@@ -84,7 +111,13 @@ docs/                                  existing docs + specs
 - **Critical paths:** the router checks paths the task will touch against the `## Critical paths` globs in the project CLAUDE.md. The model may raise the tier but never lower it.
 - **trivial:** one file, no behaviour change, no critical path. Implement → run tests → bundled `/code-review low`.
 - **standard:** `to-spec` (local-markdown tracker only; the GitHub tracker was dropped) → `implement` (uses `tdd` + Pocock `code-review`) → `verification-before-completion` → PR.
-- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → bundled `/code-review high` + `/security-review` + `/codex:adversarial-review` → PR. The hunk list in critical paths is printed to the terminal, never put in the PR.
+- **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → critical reviews → PR. The hunk list in critical paths is printed to the terminal, never put in the PR.
+- **Reviews** (`build/reviews.md`, on committed work, at most 2 review→fix rounds per tier, then the rest is listed):
+  - Standard: `/simplify`, `/code-review medium`, `/pr-review-toolkit:review-pr`, `/security-review`, the gated Codex review, targeted Trail of Bits checks, and the gitleaks secret scan (`gitleaks git --no-banner --redact --log-opts="<base>..HEAD"`, gitleaks 8.19+).
+  - Critical: the same with `/code-review xhigh` (the blueprint's "ultra" level no longer exists), plus `/claude-security:claude-security scan my branch --base <base>`, and `/insecure-defaults:audit` offered.
+  - Codex runs only when the client repo's `CLAUDE.local.md` has the line `Codex review: allowed`.
+  - Trail of Bits triggers: `supply-chain-risk-auditor` when a manifest or lockfile changes, `sharp-edges` when settings, config, auth, crypto, deserialization or risky calls change. `staff:thermo-nuclear-code-quality-review` runs on a refactor, more than 400 changed lines, a touched file over 1000 lines, or on request.
+  - supply-chain-risk-auditor sends dependency names to public package registries and advisory databases. Accepted: it is the same exposure as `pip install`. Its output goes to `~/.local/share/staff/supply-chain/<repo>/`, outside the client repo.
 - **Bugs:** `systematic-debugging` first. The regression test must fail before the fix.
 - **End of every tier:** remind the user to run `/staff:log` after merge.
 
@@ -96,11 +129,14 @@ Stage 2 changes `standard` and `critical` to: contract → locked tests → impl
 |---|---|
 | Keep enabled | ponytail, caveman (default lite), claude-mem (inbox mode), security-guidance, code-review, codex, context7, skill-creator, claude-md-management, safety-net, firecrawl, exa |
 | Disable (stay installed) | superpowers, impeccable, playwright, frontend-design |
-| Install + enable | `pyright-lsp`, `pr-review-toolkit` (official marketplace), `staff` (this repo's local marketplace) |
+| Disable user-wide (stay installed) | `qdrant@synced`, `langfuse@synced`; `scripts/stack.sh` enables them per repo at local scope |
+| Install + enable | `pyright-lsp`, `pr-review-toolkit`, `claude-security` (official marketplace); `sharp-edges`, `supply-chain-risk-auditor`, `insecure-defaults` (`trailofbits` marketplace pinned to `149d7b21f4067765b82e67029730b42d228ef4b4`); `staff` 0.3.0, 16 skills (this repo's local marketplace) |
+| Install (binary) | gitleaks 8.19+: Homebrew when it has a bottle for this macOS, otherwise the pinned release tarball, sha256-checked, into `~/.local/bin` |
 
 Notes:
 - safety-net covers destructive-command blocking, so dcg is skipped.
 - frontend-design is parked with the Next.js phase.
+- Stack skills are per repo, not user-wide: `scripts/stack.sh <repo>` maps the repo's dependencies through `stacks/manifest.tsv` (every source pinned to a commit) and installs what the user accepts at local scope, git-excluded. It installs no MCP server; any listed one is manual, with its read-only flag.
 
 ### Settings changes (`~/.claude/settings.json`, via `jq`, with backup)
 
@@ -108,6 +144,11 @@ Notes:
 - `env.CAVEMAN_DEFAULT_MODE = "lite"`.
 - claude-mem startup injection is off globally: `CLAUDE_MEM_CONTEXT_OBSERVATIONS="0"`, `CLAUDE_MEM_CONTEXT_SESSION_COUNT="0"`, `CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY="false"`. Capture stays on. `telemetry.json` has `enabled=false`.
 - `env.DISABLE_TELEMETRY="1"` and `env.DISABLE_ERROR_REPORTING="1"`.
+- `env.DO_NOT_TRACK="1"` for third-party CLIs that honour it (claude-security, the skills CLI). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is not set: it also turns off auto-updates and the plugin auto-update pass, which would stop `stable` updates and synced plugins.
+- `env.CLAUDE_SECURITY_SCAN_TIP="off"`: the router decides when claude-security scans.
+- `permissions.deny` merged (existing entries kept): `Read(**/.env)`, `Read(**/.env.*)`, `Read(**/*.pem)`, `Read(**/*.key)`, `Read(~/.ssh/**)`, `Read(~/.aws/**)`. A Read deny also blocks Edit and Write on the path.
+- `outputStyle` set from `STAFF_OUTPUT_STYLE` when that variable is set at setup (teach mode, e.g. `Explanatory` or `Learning`); otherwise unchanged.
+- `extraKnownMarketplaces.<name>.autoUpdate = false` for every third-party marketplace declared in settings. Setup prints which marketplaces still auto-update, and whether an advisor model is configured (read only).
 - `setup.sh` also installs the Karpathy CLAUDE.md to `~/.claude/CLAUDE.md` (pinned SHA and sha256), only if the file is missing, and warns if an existing one differs.
 - `enabledPlugins` updated as in the table above.
 - Third-party marketplaces (caveman, ponytail, claude-mem, codex) are pinned to a commit if the marketplace source supports a ref. If not, record the installed version in `VENDORED.md` and re-check on bump.
@@ -123,12 +164,13 @@ Notes:
   - `db` (models/repositories)
   - `agents` (`app/agents/**`, `app/llm/**`)
   - `tests` (`tests/**`)
+  - `workers` (`**/tasks.py`, `**/workers/**`, `**/celery*.py`)
 
   Content is taken from the knowledge-traceability doc §4.
 - **`.claude/settings.json`:** `permissions.ask` for firecrawl and exa MCP tools.
 - **Setup steps in the template README:**
-  - `uvx library-skills --claude`, for the official FastAPI skill.
-  - langchain-skills installed pinned.
+  - `scripts/stack.sh <repo>`, which covers the FastAPI skill (library-skills), langchain-skills and the other stack skills, pinned.
+  - The Codex opt-in line, teach mode, the ten-task pilot, untrusted-repo and full-scan habits.
   - `/setup-matt-pocock-skills` with the local-markdown tracker by default.
 
 ### Metrics
@@ -154,7 +196,7 @@ Notes:
 
 ## Verification
 
-1. `claude plugin validate` passes for `plugins/staff`.
+1. `claude plugin validate --strict plugins/staff` passes.
 2. `staff_log.py` self-test passes (`python3 plugins/staff/scripts/staff_log.py --self-test`).
 3. In a fresh session, compare `/context` startup tokens with the pre-change number, recorded in this doc. The user agrees the budget is acceptable.
    - Pre-change baseline (2026-11-25, `claude -p "/context"` in an empty scratch dir, before `setup.sh`): 22k / 300k. Skills 10k, MCP server instructions 3.1k, system prompt 1.9k, custom agents 1.4k, memory files 875, MCP tools 671, messages 4k (deferred tools not counted in the 22k). Measured outside a project repo, so it excludes claude-mem's per-project injection there.
@@ -163,3 +205,5 @@ Notes:
 5. One real task runs end to end on the pilot repo through the standard tier, and a `/staff:log` line lands.
    - Waived by the user on 2026-11-26. The AgencyOS pilot ran the critical tier end to end (stopped before push); there was no merge and no `/staff:log` line. The first real client task after `gh auth login` closes this check.
 6. `setup.sh` re-runs cleanly (idempotent) and leaves a backup of settings.json.
+7. `scripts/stack.sh --self-test` passes, and `scripts/stack.sh --dry-run <repo>` lists the expected stack rows without writing anything.
+8. Pilot: after ten real tasks on a repo, review its `metrics.jsonl` lines before trusting a tier there.
