@@ -58,10 +58,26 @@ fi
 # 2. Backup (every run, unique name, so each run is recoverable).
 backup $SETTINGS
 
-# 3. Settings merge (update channel, caveman lite, Claude Code telemetry and error reporting off). Skip the write when values already match, so re-runs leave the file byte-identical.
-if ! jq -e '.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite" and .env.DISABLE_TELEMETRY == "1" and .env.DISABLE_ERROR_REPORTING == "1"' $SETTINGS >/dev/null; then
-  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite" | .env.DISABLE_TELEMETRY = "1" | .env.DISABLE_ERROR_REPORTING = "1"'
-  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE, env.DISABLE_TELEMETRY, env.DISABLE_ERROR_REPORTING")
+# 3. Settings merge (update channel, caveman lite, Claude Code telemetry and error reporting off, DO_NOT_TRACK for
+# third-party CLIs, claude-security's post-push scan tip off because the build router decides when to scan).
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is deliberately not set: it also turns off auto-updates.
+# Skip the write when values already match, so re-runs leave the file byte-identical.
+env_ok='.autoUpdatesChannel == "stable" and .env.CAVEMAN_DEFAULT_MODE == "lite" and .env.DISABLE_TELEMETRY == "1" and .env.DISABLE_ERROR_REPORTING == "1" and .env.DO_NOT_TRACK == "1" and .env.CLAUDE_SECURITY_SCAN_TIP == "off"'
+if ! jq -e $env_ok $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.autoUpdatesChannel = "stable" | .env.CAVEMAN_DEFAULT_MODE = "lite" | .env.DISABLE_TELEMETRY = "1" | .env.DISABLE_ERROR_REPORTING = "1" | .env.DO_NOT_TRACK = "1" | .env.CLAUDE_SECURITY_SCAN_TIP = "off"'
+  changed+=("settings.json: autoUpdatesChannel, env.CAVEMAN_DEFAULT_MODE, env.DISABLE_TELEMETRY, env.DISABLE_ERROR_REPORTING, env.DO_NOT_TRACK, env.CLAUDE_SECURITY_SCAN_TIP")
+fi
+# Deny reading secret files (a Read deny also blocks Edit and Write on the path). In user settings a relative pattern
+# anchors at the session's working directory and `~/` at home. Existing deny entries stay, in order; only missing ones are added.
+deny='["Read(**/.env)","Read(**/.env.*)","Read(**/*.pem)","Read(**/*.key)","Read(~/.ssh/**)","Read(~/.aws/**)"]'
+if ! jq -e --argjson new $deny '($new - (.permissions.deny // [])) == []' $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.permissions.deny = ((.permissions.deny // []) as $d | $d + ($new - $d))' --argjson new $deny
+  changed+=("settings.json: permissions.deny (secret files)")
+fi
+# Teach mode: STAFF_OUTPUT_STYLE=Explanatory (or Learning, or a custom style name) sets the user default output style.
+if [[ -n ${STAFF_OUTPUT_STYLE:-} ]] && ! jq -e --arg s $STAFF_OUTPUT_STYLE '.outputStyle == $s' $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.outputStyle = $s' --arg s $STAFF_OUTPUT_STYLE
+  changed+=("settings.json: outputStyle")
 fi
 
 # 4. Local marketplace (name comes from .claude-plugin/marketplace.json).
@@ -71,6 +87,15 @@ if ! jq -e 'any(.[]; .name == "claude-workflow")' <<<$marketplaces >/dev/null; t
   claude plugin marketplace add "$REPO_ROOT"
   changed+=("marketplace added: claude-workflow")
 fi
+# Trail of Bits, pinned to a reviewed commit (a full SHA as ref needs Claude Code >= 2.1.324). An existing
+# registration is left alone, because re-registering uninstalls its plugins; a different pin is only reported.
+TOB_SHA=149d7b21f4067765b82e67029730b42d228ef4b4
+if ! jq -e 'any(.[]; .name == "trailofbits")' <<<$marketplaces >/dev/null; then
+  claude plugin marketplace add "trailofbits/skills#$TOB_SHA"
+  changed+=("marketplace added: trailofbits (pinned)")
+elif ! jq -e --arg sha $TOB_SHA '.trailofbits.source.ref == $sha' $HOME/.claude/plugins/known_marketplaces.json >/dev/null; then
+  print -u2 "warning: marketplace trailofbits is not pinned to $TOB_SHA; see VENDORED.md"
+fi
 
 # Prints "missing", "true" or "false" for plugin id $1 from the captured $plugins list.
 plugin_state() {
@@ -79,7 +104,8 @@ plugin_state() {
 
 # 5. Install and enable.
 plugins=$(claude plugin list --json)
-for p in pyright-lsp@claude-plugins-official pr-review-toolkit@claude-plugins-official staff@claude-workflow; do
+for p in pyright-lsp@claude-plugins-official pr-review-toolkit@claude-plugins-official claude-security@claude-plugins-official \
+    sharp-edges@trailofbits supply-chain-risk-auditor@trailofbits insecure-defaults@trailofbits staff@claude-workflow; do
   state=$(plugin_state $p)
   case $state in
     missing) claude plugin install $p; changed+=("installed $p") ;;
@@ -87,9 +113,11 @@ for p in pyright-lsp@claude-plugins-official pr-review-toolkit@claude-plugins-of
   esac
 done
 
-# 6. Disable. Keys resolved from enabledPlugins on 2026-11-25.
+# 6. Disable. Keys resolved from enabledPlugins on 2026-11-25. Stack plugins synced from claude.ai (qdrant, langfuse)
+# go off user-wide; scripts/stack.sh turns one back on in a repo that uses it, at local scope.
 plugins=$(claude plugin list --json)  # re-read: step 5 may have changed state
-for p in superpowers@claude-plugins-official impeccable@impeccable playwright@claude-plugins-official frontend-design@claude-plugins-official; do
+for p in superpowers@claude-plugins-official impeccable@impeccable playwright@claude-plugins-official frontend-design@claude-plugins-official \
+    qdrant@synced langfuse@synced; do
   state=$(plugin_state $p)
   if [[ $state == true ]]; then
     claude plugin disable $p
@@ -118,7 +146,52 @@ if [[ ! -f $CM_TELEMETRY ]] || ! jq -e '.enabled == false' $CM_TELEMETRY >/dev/n
   changed+=("claude-mem telemetry: declined")
 fi
 
-# 8. Third-party marketplace pinning: recorded in VENDORED.md ("Machine plugins"), not done here.
+# 8. Third-party marketplace auto-update off wherever settings declare the marketplace (the third-party default is
+# already off; this makes it explicit). Pinning the older marketplaces is recorded in VENDORED.md ("Machine plugins").
+mk_off='.extraKnownMarketplaces // {} | with_entries(select(.key != "claude-plugins-official")) | all(.[]; .autoUpdate == false)'
+if ! jq -e $mk_off $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.extraKnownMarketplaces |= with_entries(if .key == "claude-plugins-official" then . else .value.autoUpdate = false end)'
+  changed+=("settings.json: extraKnownMarketplaces.*.autoUpdate")
+fi
+auto_on=$(jq -r '[to_entries[] | select(.value.autoUpdate == true) | .key] | join(" ")' $HOME/.claude/plugins/known_marketplaces.json 2>/dev/null || true)
+print "marketplaces with auto-update on (official ones default to on): ${auto_on:-none}"
+# Advisor: report only; advisorModel unset means the advisor is off. Never changed here.
+if jq -e '.advisorModel // empty' $SETTINGS >/dev/null; then print "advisor: configured"; else print "advisor: not configured"; fi
+
+# 8b. gitleaks 8.19+ (the router runs `gitleaks git`). Homebrew only when it has a bottle for this macOS, because it
+# builds some formulae from source on Intel Macs; otherwise the pinned release tarball, sha256-checked.
+GITLEAKS_VERSION=8.30.1
+typeset -A GITLEAKS_SHA=(
+  x64 dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709
+  arm64 b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
+)
+# Called only in an `||` list, where errexit is off, so every step checks its own status.
+install_gitleaks() {
+  if command -v brew >/dev/null && brew ruby -e 'exit(Formula["gitleaks"].bottle ? 0 : 1)' >/dev/null 2>&1; then
+    brew install gitleaks || return 1
+    changed+=("installed gitleaks (brew bottle)")
+    return 0
+  fi
+  local arch=x64 dir ok=0
+  [[ $(uname -m) == arm64 ]] && arch=arm64
+  dir=$(mktemp -d) || return 1
+  curl -fsSL -o $dir/gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_darwin_$arch.tar.gz" \
+    && [[ $(shasum -a 256 $dir/gl.tgz | cut -d' ' -f1) == ${GITLEAKS_SHA[$arch]} ]] \
+    && tar -xzf $dir/gl.tgz -C $dir gitleaks \
+    && mkdir -p $HOME/.local/bin && install -m 755 $dir/gitleaks $HOME/.local/bin/gitleaks \
+    && ok=1
+  rm -f -- $dir/gl.tgz $dir/gitleaks; rmdir -- $dir
+  (( ok )) || return 1
+  changed+=("installed gitleaks $GITLEAKS_VERSION to ~/.local/bin")
+  [[ :$PATH: == *:$HOME/.local/bin:* ]] || print -u2 "warning: ~/.local/bin is not on PATH; add it so the router finds gitleaks"
+}
+autoload -Uz is-at-least
+if command -v gitleaks >/dev/null; then
+  gl_ver=$(gitleaks version 2>/dev/null || true)
+  is-at-least 8.19 ${gl_ver#v} || print -u2 "warning: gitleaks ${gl_ver:-unknown} is older than 8.19, which the router's secret scan needs"
+else
+  install_gitleaks || print -u2 "warning: gitleaks not installed; the router will skip the secret scan"
+fi
 
 # 9. Global guidelines: Karpathy CLAUDE.md. Upstream has no licence, so it is fetched, never committed (see VENDORED.md).
 KARPATHY_URL=https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/2c606141936f1eeef17fa3043a72095b4765b9c2/CLAUDE.md
