@@ -4,7 +4,10 @@ paths:
   - "app/repositories/**"
   - "alembic/versions/**"
 ---
-# DB rules
+# DB rules (SQLAlchemy and Alembic; the money, time, constraint and timeout lines apply to Django ORM too)
+- Money is `Decimal` (`Numeric` in the DB), never float. Datetimes are tz-aware UTC.
+- Invariants live in DB constraints (unique, check, foreign key, not null), not only in app code.
+- Migrations and app connections set `lock_timeout` and `statement_timeout`.
 - One session per request. Never share a session across `asyncio.gather` tasks; open one per task.
 - Relationships default to `lazy="raise"`. Load with `selectinload`/`joinedload`, and `raiseload("*")` on hot paths.
 - Only repositories touch SQLAlchemy. Services own transactions; repositories do not commit.

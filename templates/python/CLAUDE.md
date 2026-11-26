@@ -22,6 +22,11 @@
 - Tenant isolation is enforced in one place (<RLS or a repository filter>); never hand-filter tenant_id in handlers.
 - Relationships default to `lazy="raise"`; load explicitly.
 - Every LLM/HTTP call has a timeout; must-happen work goes to the queue, never `BackgroundTasks`.
+- Stack versions: <Python 3.x, FastAPI x, SQLAlchemy x, Pydantic x, LangGraph x>. Read these before using an API from memory.
+- New dependencies need the user's approval first.
+- No bare `except:` or broad `except Exception` without re-raise or a logged reason.
+- Logs are structured and carry `request_id` and `tenant_id`. Secrets come from env only; never log or hard-code them.
+- Flag any touched file over 500 lines in the PR summary.
 
 ## Critical paths
 <!-- /staff:build treats any task touching a match as critical. Edit to fit this repo. -->

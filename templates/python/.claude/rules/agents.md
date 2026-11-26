@@ -13,3 +13,9 @@ paths:
 - Prompts live in `prompts/` files, not inline strings. A prompt change is a critical-path change.
 - Trace every run (provider, model, token counts, latency). Never log secrets or raw user PII.
 - Must-happen work goes to the queue, never `BackgroundTasks`.
+- Side effects before `interrupt()` must be idempotent: the node reruns from the top on resume.
+- State keys written by parallel nodes need a reducer (`Annotated[list, operator.add]`), or the last write wins silently.
+- Pick the checkpointer and durability mode on purpose. `thread_id` is tenant-scoped (`<tenant>:<id>`), never a bare user-supplied value.
+- Renaming or removing a node breaks saved checkpoints. Ship a migration or drain old threads first.
+- Cap tokens, iterations and spend per tenant. Handle 429s with backoff and a configured fallback model.
+- Any prompt, model or tool change adds or updates eval cases. Traces record the prompt version.

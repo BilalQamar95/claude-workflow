@@ -12,3 +12,6 @@ paths:
 - Paginate every list endpoint (`limit`, `cursor`). Cap `limit`.
 - Inject the DB session with `Depends`; never create sessions inside handlers.
 - Async handlers must not call blocking code. Use `run_in_threadpool` or a sync `def` route.
+- CORS lists explicit origins, never `*` with credentials. Cookie auth needs CSRF protection.
+- `/docs`, `/redoc` and `/openapi.json` are off in production unless deliberately public.
+- Send security headers (HSTS, `X-Content-Type-Options: nosniff`, a frame policy) at the app or the proxy.

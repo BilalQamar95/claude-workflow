@@ -2,7 +2,7 @@
 paths:
   - "tests/**"
 ---
-# Test rules
+# Test rules (pytest; the API-client line is FastAPI-only, the rest apply to Django too)
 - Test through the public interface. Do not mock the unit under test; mock only external boundaries (LLM, HTTP, clock).
 - API tests use `httpx.AsyncClient(transport=ASGITransport(app=app))`.
 - Use a real Postgres via testcontainers, not SQLite, for anything touching models or queries.
@@ -11,3 +11,5 @@ paths:
 - Mark slow tests `@pytest.mark.slow` so the fast suite stays fast.
 - Do not edit or weaken an existing test to make it pass. If a test is wrong, say why in the PR.
 - LLM calls in tests use recorded or fake responses. Never hit a live provider.
+- Every endpoint gets denial tests next to the happy path: another tenant's id gives 404, no auth gives 401.
+- Freeze time (`time-machine` or `freezegun`) in any test that depends on the clock.
