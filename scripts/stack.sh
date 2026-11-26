@@ -16,12 +16,12 @@ haystack() {
   # shortcut: reads the repo root and one directory down only; widen the glob if a monorepo keeps its deps deeper.
   for f in $1/{,*/}{pyproject.toml,requirements*.txt,package.json,compose*.y*ml,docker-compose*.y*ml,Dockerfile}(N.); do
     print -r -- "file: ${f:t}"
-    cat -- $f
+    grep -v '^[[:space:]]*#' -- $f || true  # comment lines would match as dependencies
   done | tr '[:upper:]' '[:lower:]'
 }
 
 # Prints the manifest ids whose detect pattern matches haystack $1, in manifest order.
-# shortcut: plain substring regex, so a name in a comment also matches; the y/N prompt is the filter.
+# shortcut: plain substring regex, so a name in a description or config also matches; the y/N prompt is the filter.
 matches() {
   local id detect rest
   while IFS=$'\t' read -r id detect rest; do
@@ -38,11 +38,12 @@ add_excludes() {
   for p in $EXCLUDES; do grep -sqxF -- $p $1 || print -r -- $p >>$1; done
 }
 
-# Asks prompt $1 with default $2 (y or n). Without a terminal the default stands.
+# Asks prompt $1 with default $2 (y or n). Without a terminal the answer is no: nothing installs unattended.
 ask() {
   local ans= hint=y/N
   [[ $2 == y ]] && hint=Y/n
-  [[ -t 0 ]] && { read -r "ans?$1 [$hint] " || ans=; }
+  [[ -t 0 ]] || return 1
+  read -r "ans?$1 [$hint] " || ans=
   [[ ${ans:-$2} == [yY]* ]]
 }
 
@@ -74,7 +75,7 @@ install_row() {
       (cd $repo && DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 npx -y $SKILLS_CLI add $src $args -a claude-code -y) ;;
     plugin)
       jq -e --arg p $items '.enabledPlugins[$p] == true' $repo/.claude/settings.local.json >/dev/null 2>&1 && return 0
-      if ! claude plugin marketplace list --json | jq -e --arg m ${items#*@} 'any(.[]; .name == $m)' >/dev/null; then
+      if ! (cd $repo && claude plugin marketplace list --json) | jq -e --arg m ${items#*@} 'any(.[]; .name == $m)' >/dev/null; then
         (cd $repo && claude plugin marketplace add --scope local $src) || return 1
       fi
       (cd $repo && claude plugin install $items --scope local) ;;
@@ -98,6 +99,8 @@ self_test() {
   got=(${(f)"$(matches 'file: compose.yaml')"}); eq "$got" docker compose-v2-name
   got=(${(f)"$(matches 'file: dockerfile')"}); eq "$got" docker dockerfile
   got=(${(f)"$(matches 'pydantic_ai')"}); eq "$got" "pydantic pydantic-ai" underscore-name
+  # No terminal means no, even for a default-y row.
+  ask 'x?' y </dev/null && eq yes no ask-no-tty
   # Every row has 7 fields, a pinned source for its kind, and a y/n default.
   got=$(awk -F'\t' '!/^#/ && NF && !(NF == 7 && $6 ~ /^[yn]$/ &&
     (($3 == "skills" && $4 ~ /^[^\/@]+\/[^\/@]+@[0-9a-f]{40}$/) || ($3 == "plugin" && $4 ~ /^[^\/#]+\/[^\/#]+#[0-9a-f]{40}$/) ||

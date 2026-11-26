@@ -114,14 +114,15 @@ for p in pyright-lsp@claude-plugins-official pr-review-toolkit@claude-plugins-of
 done
 
 # 6. Disable. Keys resolved from enabledPlugins on 2026-11-25. Stack plugins synced from claude.ai (qdrant, langfuse)
-# go off user-wide; scripts/stack.sh turns one back on in a repo that uses it, at local scope.
+# go off user-wide; scripts/stack.sh turns one back on in a repo that uses it, at local scope. codex is off user-wide
+# too: its rescue command and agent are model-invocable and would send code to OpenAI; each repo enables it at local scope.
 plugins=$(claude plugin list --json)  # re-read: step 5 may have changed state
 for p in superpowers@claude-plugins-official impeccable@impeccable playwright@claude-plugins-official frontend-design@claude-plugins-official \
-    qdrant@synced langfuse@synced; do
+    qdrant@synced langfuse@synced codex@openai-codex; do
   state=$(plugin_state $p)
   if [[ $state == true ]]; then
-    claude plugin disable $p
-    changed+=("disabled $p")
+    # An org-required plugin refuses to disable; warn and carry on so later steps still run.
+    claude plugin disable $p && changed+=("disabled $p") || print -u2 "warning: could not disable $p (required by your organization?)"
   fi
 done
 
@@ -186,8 +187,8 @@ install_gitleaks() {
   [[ :$PATH: == *:$HOME/.local/bin:* ]] || print -u2 "warning: ~/.local/bin is not on PATH; add it so the router finds gitleaks"
 }
 autoload -Uz is-at-least
-if command -v gitleaks >/dev/null; then
-  gl_ver=$(gitleaks version 2>/dev/null || true)
+if command -v gitleaks >/dev/null || [[ -x $HOME/.local/bin/gitleaks ]]; then
+  gl_ver=$( { command -v gitleaks >/dev/null && gitleaks version || $HOME/.local/bin/gitleaks version; } 2>/dev/null || true)
   is-at-least 8.19 ${gl_ver#v} || print -u2 "warning: gitleaks ${gl_ver:-unknown} is older than 8.19, which the router's secret scan needs"
 else
   install_gitleaks || print -u2 "warning: gitleaks not installed; the router will skip the secret scan"

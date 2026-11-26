@@ -29,7 +29,7 @@ Deferred to stage 2 from the 2026-11-26 doc audit, so none of it is dropped sile
 
 - S1 `/staff:learn` loop (regression test, then a hookify, semgrep or ruff rule with a proof test, a rules line last): it needs the gate to land rules into.
 - S2 agentic production-failure skill and the six-question workflow-vs-agent rule: custom knowledge, written after the pilot shows which failures recur.
-- S3 eval scaffolding for LLM behaviour changes: langchain-skills `eval-engineering`, DeepEval and the langfuse skill are installable per repo through `stacks/manifest.tsv`; wiring them into the gate is stage 2.
+- S3 eval scaffolding for LLM behaviour changes: the langchain `langchain-eval-engineering` skill, DeepEval and the langfuse skill are installable per repo through `stacks/manifest.tsv`; wiring them into the gate is stage 2.
 - S4 PostToolUse ruff format and check hook: only safe when the repo has its own ruff config, which the gate's `quality.toml` will say.
 - S5 `/staff:init` interview (the D-list and A-list defaults): the template README is filled in by hand until then.
 - S6 ADRs and glossary (Pocock `domain-modeling`, `grill-with-docs`): vendored with the contract work that consumes them.
@@ -38,6 +38,8 @@ Deferred to stage 2 from the 2026-11-26 doc audit, so none of it is dropped sile
 - S9 automated re-scan of vendored skills in CI: comes with S8.
 - S10 `plugin-dev` toolkit: needed once hooks and agents are built.
 - S11 hook latency: measure once with `--debug` hook timings when the gate adds hooks.
+- Stage 1a critic panel (BP:74-78): a panel of critic agents over the contract and review output; it belongs with the review workflow and verifier.
+- W24 caveman `--minimal` install: not built; caveman stays at default lite (setup merges the lite setting).
 
 Skipped from the same audit, with the reason:
 
@@ -46,6 +48,7 @@ Skipped from the same audit, with the reason:
 - K3 security-guidance as a plugin.json dependency: it is already enabled user-wide.
 - K4 lint, type, layering config and git conventions: the client owns these in client repos, and writing them would put workflow config in client PRs; own repos get them in stage 2 through `quality.toml`.
 - K5 Pocock `writing-for-agents`, `prototype`, `research`: skill-creator and claude-md-management cover writing, exa, firecrawl and context7 cover research, and nothing needs prototype yet.
+- W24 "never run `caveman-compress` on CLAUDE.md or rules": built as a habit line in the template README, not enforced by a hook (a hook belongs with the gate).
 - K6 observability standards (health and readiness, OTel, dashboards): product decisions per client that belong to the ship checklist.
 
 ## Anti-goals
@@ -113,9 +116,9 @@ docs/                                  existing docs + specs
 - **standard:** `to-spec` (local-markdown tracker only; the GitHub tracker was dropped) → `implement` (uses `tdd` + Pocock `code-review`) → `verification-before-completion` → PR.
 - **critical:** `grill-me` → `to-spec` → `to-tickets` → `implement-spec` → critical reviews → PR. The hunk list in critical paths is printed to the terminal, never put in the PR.
 - **Reviews** (`build/reviews.md`, on committed work, at most 2 review→fix rounds per tier, then the rest is listed):
-  - Standard: `/simplify`, `/code-review medium`, `/pr-review-toolkit:review-pr`, `/security-review`, the gated Codex review, targeted Trail of Bits checks, and the gitleaks secret scan (`gitleaks git --no-banner --redact --log-opts="<base>..HEAD"`, gitleaks 8.19+).
+  - Standard: `/simplify`, `/code-review medium`, the pr-review-toolkit agents (silent-failure-hunter and pr-test-analyzer always, type-design-analyzer and comment-analyzer when types or comments changed) invoked directly on `git diff <base>...HEAD`, `/security-review`, the gated Codex review, targeted Trail of Bits checks, and the gitleaks secret scan (`gitleaks git --no-banner --redact --log-opts="<base>..HEAD"`, gitleaks 8.19+).
   - Critical: the same with `/code-review xhigh` (the blueprint's "ultra" level no longer exists), plus `/claude-security:claude-security scan my branch --base <base>`, and `/insecure-defaults:audit` offered.
-  - Codex runs only when the client repo's `CLAUDE.local.md` has the line `Codex review: allowed`.
+  - Codex is off user-wide, because its rescue command and agent are model-invocable and would send code to OpenAI. A repo enables it with `claude plugin enable codex@openai-codex --scope local` together with the line `Codex review: allowed` in `CLAUDE.local.md`; the router runs the Codex review only with that line.
   - Trail of Bits triggers: `supply-chain-risk-auditor` when a manifest or lockfile changes, `sharp-edges` when settings, config, auth, crypto, deserialization or risky calls change. `staff:thermo-nuclear-code-quality-review` runs on a refactor, more than 400 changed lines, a touched file over 1000 lines, or on request.
   - supply-chain-risk-auditor sends dependency names to public package registries and advisory databases. Accepted: it is the same exposure as `pip install`. Its output goes to `~/.local/share/staff/supply-chain/<repo>/`, outside the client repo.
 - **Bugs:** `systematic-debugging` first. The regression test must fail before the fix.
@@ -127,9 +130,9 @@ Stage 2 changes `standard` and `critical` to: contract → locked tests → impl
 
 | Action | Plugins |
 |---|---|
-| Keep enabled | ponytail, caveman (default lite), claude-mem (inbox mode), security-guidance, code-review, codex, context7, skill-creator, claude-md-management, safety-net, firecrawl, exa |
+| Keep enabled | ponytail, caveman (default lite), claude-mem (inbox mode), security-guidance, code-review, context7, skill-creator, claude-md-management, safety-net, firecrawl, exa |
 | Disable (stay installed) | superpowers, impeccable, playwright, frontend-design |
-| Disable user-wide (stay installed) | `qdrant@synced`, `langfuse@synced`; `scripts/stack.sh` enables them per repo at local scope |
+| Disable user-wide (stay installed) | `qdrant@synced`, `langfuse@synced` (`scripts/stack.sh` enables them per repo at local scope); `codex@openai-codex` (enabled per repo at local scope, only together with the `Codex review: allowed` marker) |
 | Install + enable | `pyright-lsp`, `pr-review-toolkit`, `claude-security` (official marketplace); `sharp-edges`, `supply-chain-risk-auditor`, `insecure-defaults` (`trailofbits` marketplace pinned to `149d7b21f4067765b82e67029730b42d228ef4b4`); `staff` 0.3.0, 16 skills (this repo's local marketplace) |
 | Install (binary) | gitleaks 8.19+: Homebrew when it has a bottle for this macOS, otherwise the pinned release tarball, sha256-checked, into `~/.local/bin` |
 
@@ -169,7 +172,7 @@ Notes:
   Content is taken from the knowledge-traceability doc §4.
 - **`.claude/settings.json`:** `permissions.ask` for firecrawl and exa MCP tools.
 - **Setup steps in the template README:**
-  - `scripts/stack.sh <repo>`, which covers the FastAPI skill (library-skills), langchain-skills and the other stack skills, pinned.
+  - `scripts/stack.sh <repo>`, which covers the FastAPI skill (library-skills), the cherry-picked LangChain/LangGraph/LangSmith skills (no plugin, no docs MCPs) and the other stack skills, pinned.
   - The Codex opt-in line, teach mode, the ten-task pilot, untrusted-repo and full-scan habits.
   - `/setup-matt-pocock-skills` with the local-markdown tracker by default.
 

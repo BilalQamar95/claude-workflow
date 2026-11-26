@@ -10,7 +10,7 @@ Task: $ARGUMENTS
 ## How to run a step
 
 - `staff:<name>`: read `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md` and follow it. The same applies when a skill you are following names another staff skill (e.g. implement → tdd, code-review; implement-spec → implement), even if it says to call the Skill tool: the Skill tool blocks staff skills that set `disable-model-invocation`, and reading the file always works. When you brief a subagent to run a staff skill, give it that file path, the PR rule and the no-`git add` rule below.
-- `/code-review <level>`: the bundled Claude Code review, not `staff:code-review`. Call the Skill tool with `code-review`, args `<level>` (plus a target if the step gives one). Other slash steps (`/security-review`, `/simplify`, `/pr-review-toolkit:review-pr`, `/claude-security:claude-security`): Skill tool with the name after `/`, args as given. Wait for each result before fixing.
+- `/code-review <level>`: the bundled Claude Code review, not `staff:code-review`. Call the Skill tool with `code-review`, args `<level>` (plus a target if the step gives one). Other slash steps (`/security-review`, `/simplify`, `/claude-security:claude-security`): Skill tool with the name after `/`, args as given. Wait for each result before fixing.
 - When a step asks for a review fixed point, use the default branch (usually `main`).
 - PR rule: every PR title and body is a plain, client-facing description of the change (what, why, how tested). Leave this workflow out: no tier, hunk list, metrics, labels or skill names. Write PR bodies, commit messages, specs and handoffs in normal prose, never caveman style. This covers every PR, including the draft PR `staff:implement-spec` opens and any PR another followed skill creates.
 - Project config: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `docs/agents/issue-tracker.md`, whichever exist. Read critical paths and the tracker config from them.
@@ -38,7 +38,7 @@ Standard and critical write workflow files, so first make sure git ignores them 
 ```bash
 ex="$(git rev-parse --git-common-dir)/info/exclude"; mkdir -p "$(dirname "$ex")"
 [ -z "$(tail -c1 "$ex" 2>/dev/null)" ] || echo >> "$ex"
-for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
+for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ 'CLAUDE-SECURITY-*/'; do grep -sqxF "$p" "$ex" || echo "$p" >> "$ex"; done
 ```
 
 `docs/adr/` and `GLOSSARY.md` are excluded. If the client repo already tracks its own ADRs or glossary there, tracked files are unaffected, but new hand-written ADRs there won't show in `git status`: check before excluding.
