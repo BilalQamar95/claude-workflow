@@ -1,0 +1,31 @@
+# Validates the plugin and marketplace manifests and runs every self-test. Client code never runs here.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq zsh jq
+          pipx install uv==0.11.14
+          npm install -g @anthropic-ai/claude-code@2.1.323
+      - name: Validate the marketplace and plugin
+        run: |
+          claude plugin validate .
+          claude plugin validate plugins/staff
+      - name: Self-tests
+        run: |
+          zsh scripts/stack.sh --self-test
+          uv run --python 3.11 plugins/staff/scripts/staff_log.py --self-test
+      - name: Gate tests
+        run: uv run --python 3.11 --with pytest==9.0.3 --with pytest-cov==7.1.0 pytest tests/gate -q -p no:cacheprovider

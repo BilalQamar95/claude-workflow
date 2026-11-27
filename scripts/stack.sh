@@ -124,8 +124,9 @@ self_test() {
   # No terminal means no, even for a default-y row.
   ask 'x?' y </dev/null && eq yes no ask-no-tty
   # Every row has 7 fields, a pinned source for its kind, and a y/n default.
-  got=$(awk -F'\t' '!/^#/ && NF && !(NF == 7 && $6 ~ /^[yn]$/ &&
-    (($3 == "skills" && $4 ~ /^[^\/@]+\/[^\/@]+@[0-9a-f]{40}$/) || ($3 == "plugin" && $4 ~ /^[^\/#]+\/[^\/#]+#[0-9a-f]{40}$/) ||
+  # A 40-hex commit pattern spelled out: Debian's default awk (mawk) has no {n} repeat counts.
+  got=$(awk -F'\t' -v sha="$(printf '[0-9a-f]%.0s' {1..40})" '!/^#/ && NF && !(NF == 7 && $6 ~ /^[yn]$/ &&
+    (($3 == "skills" && $4 ~ ("^[^/@]+/[^/@]+@" sha "$")) || ($3 == "plugin" && $4 ~ ("^[^/#]+/[^/#]+#" sha "$")) ||
      ($3 == "synced" && $4 == "-" && $5 ~ /@synced$/) || ($3 == "library-skills" && $4 ~ /@[0-9.]+$/))) { print $1 }' $MANIFEST)
   eq "$got" "" manifest-pins
   # Excludes: newline guard on a file without a trailing newline, then idempotent.
