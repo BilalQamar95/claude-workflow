@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Per-repo stack skills: detects a repo's dependencies, offers the matching rows of stacks/manifest.tsv one by one,
 # and installs the accepted ones at local scope. Every path it writes is git-excluded first; it never commits.
-# Without a terminal it installs nothing and only writes the excludes.
+# It also offers the Bash sandbox (default yes). Without a terminal it installs nothing, leaves the sandbox alone and
+# only writes the excludes.
 # Usage: scripts/stack.sh [--dry-run] <repo-path>
 #        scripts/stack.sh --self-test
 set -euo pipefail
@@ -60,6 +61,24 @@ enable_local() {
   { jq --arg p $2 '.enabledPlugins[$p] = true' $f >$t && mv $t $f; } || { rm -f -- $t; return 1; }
 }
 
+# Sandbox for Bash in settings file $1: on, writes also to the staff state dir and uv's cache (uv won't run without a
+# writable cache), and Python package indexes and GitHub pre-allowed; other hosts prompt. Existing entries are kept.
+# shortcut: a sandboxed command can still write uv's cache, which the gate hooks run from outside the sandbox.
+SANDBOX_WRITE=(${STAFF_STATE_DIR:-$HOME/.local/share/staff} $HOME/.cache/uv)
+SANDBOX_DOMAINS=(pypi.org files.pythonhosted.org github.com api.github.com)
+sandbox_local() {
+  local f=$1 t
+  mkdir -p ${f:h}
+  [[ -s $f ]] || print '{}' >$f
+  t=$(mktemp $f.XXXXXX) || return 1
+  { jq --argjson w "$(jq -nc '$ARGS.positional' --args $SANDBOX_WRITE)" \
+       --argjson d "$(jq -nc '$ARGS.positional' --args $SANDBOX_DOMAINS)" '
+      .sandbox.enabled = true
+      | .sandbox.filesystem.allowWrite = ((.sandbox.filesystem.allowWrite // []) as $o | $o + ($w - $o))
+      | .sandbox.network.allowedDomains = ((.sandbox.network.allowedDomains // []) as $o | $o + ($d - $o))' $f >$t &&
+    mv $t $f; } || { rm -f -- $t; return 1; }
+}
+
 # Installs one manifest row into repo $1. Called only in an `||` list (errexit off), so each step chains with &&.
 install_row() {
   local repo=$1 kind=$2 src=$3 items=$4 s
@@ -115,6 +134,13 @@ self_test() {
   add_excludes $t; add_excludes $t
   eq "$(<$t)" "keep"$'\n'"${(pj:\n:)EXCLUDES}" excludes
   rm -f -- $t
+  # Sandbox: keeps other keys and existing entries, then idempotent.
+  t=$(mktemp)
+  print '{"enabledPlugins":{"x@y":true},"sandbox":{"filesystem":{"allowWrite":["/keep"]}}}' >$t
+  sandbox_local $t; sandbox_local $t
+  eq "$(jq -c . $t)" "$(jq -nc --args '{enabledPlugins:{"x@y":true},sandbox:{filesystem:{allowWrite:(["/keep"] + $ARGS.positional[:2])},
+    enabled:true,network:{allowedDomains:$ARGS.positional[2:]}}}' $SANDBOX_WRITE $SANDBOX_DOMAINS)" sandbox
+  rm -f -- $t
   (( fails == 0 )) && print "self-test: ok" || { print -u2 "self-test: $fails failed"; return 1; }
 }
 
@@ -137,6 +163,16 @@ if (( ! dry )); then
   for p in .claude/settings.local.json skills-lock.json; do
     [[ -z $(git -C $repo ls-files -- $p) ]] || { print -u2 "$p is tracked in $repo; refusing to install stack skills"; exit 1; }
   done
+  print "sandbox: Bash may write only the repo, temp, $SANDBOX_WRITE; network to $SANDBOX_DOMAINS pre-allowed, other hosts prompt"
+  if ask "turn on the Bash sandbox for this repo?" y; then
+    sandbox_local $repo/.claude/settings.local.json && print "sandbox: on" || { print -u2 "sandbox: failed"; exit 1; }
+    [[ $(uname) != Linux ]] || command -v bwrap socat >/dev/null ||
+      print -u2 "sandbox: needs bubblewrap and socat on Linux, or Claude Code runs commands unsandboxed"
+  else
+    print "sandbox: unchanged"
+  fi
+else
+  print "sandbox: would offer to turn it on (default yes)"
 fi
 (( $#ids )) || { print "no stack matches in $repo"; exit 0; }
 

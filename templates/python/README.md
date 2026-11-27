@@ -16,7 +16,7 @@ For FastAPI, SQLAlchemy and LangGraph projects. The rules are FastAPI-flavoured;
    <workflow-repo>/scripts/stack.sh --dry-run <client-repo>
    <workflow-repo>/scripts/stack.sh <client-repo>
    ```
-   It asks y/N per match (community sources default to N), installs at local scope, and git-excludes everything it writes plus the workflow files `/staff:build` writes. Run it even with no stack matches: the router stops until those excludes exist.
+   It asks y/N per match (community sources default to N), installs at local scope, and git-excludes everything it writes plus the workflow files `/staff:build` writes. It also offers the Bash sandbox (default yes), limiting shell writes to the repo, temp, the staff state directory and uv's cache, with PyPI and GitHub pre-allowed and other hosts prompting. Run it even with no stack matches: the router stops until those excludes exist.
 3. To allow Codex in this repo, do both: add the line `Codex review: allowed` to `CLAUDE.local.md`, and run `claude plugin enable codex@openai-codex --scope local` (writes `.claude/settings.local.json`, excluded in step 1). Setup turns Codex off user-wide because its rescue command and agent can send code to OpenAI on their own; without both, no Codex runs.
 4. In Claude Code, run `/staff:setup-matt-pocock-skills` and pick the local-markdown tracker. Have it write the `## Agent skills` section into `CLAUDE.local.md` (not `CLAUDE.md`); do not write it by hand.
 5. Fill in Commands, Map and Critical paths in `CLAUDE.md`. Keep it at or under 120 lines.
