@@ -1,0 +1,32 @@
+{
+  "description": "Staff gate: during an active staff task, deny edits to locked tests, protected config and gate-owned files, ask before new packages, and report ruff findings after Python edits.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh", "pre-tool"],
+            "timeout": 30,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh", "post-tool"],
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

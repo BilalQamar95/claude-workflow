@@ -635,3 +635,184 @@ def test_record_missing_a_key_stops_without_traceback(red, state):
     rec_path.write_text(json.dumps(rec))
     code, out = verify(red, state)
     assert code == 2 and "unreadable" in out and "Traceback" not in out, out
+
+
+# ---- hooks --------------------------------------------------------------------------------
+
+GUARD = GATE.parents[1] / "hooks/guard.sh"
+
+
+def hook(state, event, payload, path_env=None):
+    env = {**__import__("os").environ, "STAFF_STATE_DIR": str(state)}
+    if path_env:
+        env["PATH"] = path_env
+    p = subprocess.run(["sh", str(GUARD), event], input=json.dumps(payload), capture_output=True, text=True, env=env)
+    out = json.loads(p.stdout) if p.stdout.strip() else None
+    return p.returncode, out, p.stderr
+
+
+def decision(out):
+    return out and out["hookSpecificOutput"]["permissionDecision"]
+
+
+def bash(repo, command):
+    return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(repo)}
+
+
+def edit(repo, rel_path, tool="Edit"):
+    return {"tool_name": tool, "tool_input": {"file_path": str(repo / rel_path)}, "cwd": str(repo)}
+
+
+def test_guard_without_active_task_starts_no_python(tmp_path, state):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "uv").write_text(f"#!/bin/sh\ntouch {tmp_path / 'uv-ran'}\n")
+    (fake / "uv").chmod(0o755)
+    code, out, err = hook(state, "pre-tool", {"tool_name": "Edit"}, path_env=f"{fake}:/usr/bin:/bin")
+    assert (code, out, err) == (0, None, "") and not (tmp_path / "uv-ran").exists()
+
+
+@pytest.mark.parametrize("payload,expect", [
+    (lambda r: edit(r, "tests/test_mul.py"), "is a locked test of task t-mul"),
+    (lambda r: edit(r, "tests/pytest.ini", "Write"), "is protected config"),
+    (lambda r: edit(r, ".staff-gate.toml", "Write"), "is protected config"),
+    (lambda r: bash(r, "sed -i '' s/6/5/ tests/test_mul.py"), "locked test"),
+    (lambda r: bash(r, "echo x > tests/test_mul.py"), "locked test"),
+    (lambda r: bash(r, "mv tests/test_mul.py /tmp/x.py"), "locked test"),
+    (lambda r: bash(r, "rm tests/test_calc.py"), "locked test"),
+    (lambda r: bash(r, "git checkout -- tests/test_mul.py"), "locked test"),
+    (lambda r: bash(r, "git restore tests/test_mul.py"), "locked test"),
+    (lambda r: bash(r, "cd tests && sed -i s/6/5/ test_mul.py"), "tests/test_mul.py is a locked test"),
+    (lambda r: bash(r, "cp /tmp/x tests/conftest.py"), "protected config"),
+    (lambda r: bash(r, "python3 -c \"open('tests/test_mul.py', 'w')\""), "inline code names"),
+    (lambda r: bash(r, "git commit --no-verify -m x"), "--no-verify"),
+    (lambda r: bash(r, "git commit -nm x"), "--no-verify"),
+], ids=["edit-locked", "write-pytest-ini", "write-gate-config", "sed-i", "redirect", "mv", "rm", "checkout", "restore",
+        "cd-basename", "cp-onto-conftest", "inline-python", "no-verify", "commit-n"])
+def test_pre_tool_denies_tampering(red, state, payload, expect):
+    lock_with(red, state)
+    code, out, err = hook(state, "pre-tool", payload(red))
+    assert code == 0 and decision(out) == "deny" and expect in out["hookSpecificOutput"]["permissionDecisionReason"], (out, err)
+
+
+def test_pre_tool_denies_writes_to_gate_state(red, state):
+    lock_with(red, state)
+    (m,) = (state / "gate/active").iterdir()
+    for payload in (edit(red, m, "Write"), bash(red, f"rm '{m}'"), bash(red, f"echo x > '{state}/gate/x'")):
+        code, out, err = hook(state, "pre-tool", payload)
+        assert decision(out) == "deny" and "only the gate writes" in out["hookSpecificOutput"]["permissionDecisionReason"], (payload, out, err)
+    code, out, _ = hook(state, "pre-tool", edit(red, GATE, "Write"))
+    assert decision(out) == "deny" and "the staff plugin" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("payload", [
+    lambda r: edit(r, "pkg/calc.py"),
+    lambda r: edit(r, "tests/test_new.py", "Write"),
+    lambda r: bash(r, "cat tests/test_mul.py"),
+    lambda r: bash(r, "python -m pytest tests/test_mul.py 2>&1 | tail -5"),
+    lambda r: bash(r, "python -m pytest tests/test_mul.py > out.txt"),
+    lambda r: bash(r, "cp tests/test_mul.py /tmp/copy.py"),
+    lambda r: bash(r, f"uv run --script '{GATE}' verify t-mul"),
+    lambda r: bash(r, "git commit -m 'add mul'"),
+], ids=["edit-source", "new-test", "cat", "pytest-pipe", "pytest-redirect", "cp-from", "gate", "commit"])
+def test_pre_tool_allows_normal_work(red, state, payload):
+    lock_with(red, state)
+    code, out, err = hook(state, "pre-tool", payload(red))
+    assert (code, out) == (0, None), (out, err)
+
+
+def test_pre_tool_ignores_worktrees_without_an_active_task(red, state, tmp_path):
+    lock_with(red, state)
+    other = tmp_path / "other"
+    other.mkdir()
+    sh(other, "git", "init", "-q")
+    write(other, "tests/test_mul.py", "x = 1\n")
+    code, out, _ = hook(state, "pre-tool", edit(other, "tests/test_mul.py"))
+    assert (code, out) == (0, None)
+
+
+@pytest.mark.parametrize("command,allowed,expect", [
+    ("pip install requests", [], "ask"),
+    ("uv add requests", ["requests"], None),
+    ("uv add 'Requests[socks]>=2'", ["requests"], None),
+    ("python -m pip install -r reqs.txt", [], "ask"),
+    ("uv pip install numpy requests", ["requests"], "ask"),
+    ("uv sync", [], None),
+], ids=["unlisted", "listed", "normalised", "requirements-file", "one-unlisted", "sync"])
+def test_package_installs(red, state, command, allowed, expect):
+    write(red, ".scratch/t-mul/contract.json", "")  # replaced below
+    red_contract = contract(red, allowed_new_deps=allowed)
+    assert cli(red, state, "lock", red_contract)[0] == 0
+    code, out, err = hook(state, "pre-tool", bash(red, command))
+    assert decision(out) == expect, (out, err)
+    if expect:
+        assert "best effort" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+FAKE_RUFF = "#!/bin/sh\n[ \"$1\" = check ] || exit 0\nshift\nif grep -l BADLINT \"$@\"; then exit 1; fi\n"
+
+
+@pytest.mark.parametrize("uses_ruff", [True, False])
+def test_post_tool_ruff_feedback_only_when_configured(red, state, uses_ruff):
+    write(red, "bin/ruff", FAKE_RUFF)
+    (red / "bin/ruff").chmod(0o755)
+    if uses_ruff:
+        cfg = red / ".staff-gate.toml"
+        cfg.write_text(cfg.read_text().replace(f"lint = [{PY!r}, \"lint.py\"]", 'lint = ["./bin/ruff", "check"]'))
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL + "# BADLINT\n")
+    code, out, err = hook(state, "post-tool", edit(red, "pkg/calc.py"))
+    if uses_ruff:
+        assert out and out["decision"] == "block" and "pkg/calc.py" in out["reason"], (out, err)
+    else:
+        assert out is None, out
+
+
+def test_unreadable_record_blocks_with_exit_2(red, state):
+    lock_with(red, state)
+    (task_state(state, red) / "contract.json").write_text("{")
+    code, out, err = hook(state, "pre-tool", edit(red, "pkg/calc.py"))
+    assert code == 2 and "no readable lock record" in err, err
+
+
+# Cases from the hook review: each was allowed and shouldn't be, or the reverse.
+def test_review_bypasses_of_the_state_dir_are_denied(red, state):
+    lock_with(red, state)
+    (m,) = (state / "gate/active").iterdir()
+    cmds = [f"cd '{state}/gate' && rm -r active", f"rm -r '{state.parent}'", f"mv '{state}' /tmp/x",
+            f"rm -r '{state}'/gat*", f"find '{state}' -delete", "STAFF_STATE_DIR=/tmp/x uv run staff_gate.py lock c.json",
+            f"python3 -c \"import shutil; shutil.rmtree('{state}')\""]
+    for c in cmds:
+        code, out, err = hook(state, "pre-tool", bash(red, c))
+        assert decision(out) == "deny", (c, out, err)
+    upper = Path(str(m).replace("/gate/active/", "/GATE/ACTIVE/"))
+    if upper.exists():  # case-insensitive filesystem
+        code, out, _ = hook(state, "pre-tool", edit(red, upper, "Write"))
+        assert decision(out) == "deny", out
+
+
+def test_case_variant_of_locked_test_is_denied_where_the_filesystem_folds_case(red, state):
+    lock_with(red, state)
+    if not (red / "tests/TEST_MUL.py").exists():
+        pytest.skip("case-sensitive filesystem: a different spelling is a different file")
+    code, out, _ = hook(state, "pre-tool", edit(red, "tests/TEST_MUL.py", "Write"))
+    assert decision(out) == "deny" and "tests/test_mul.py is a locked test" in out["hookSpecificOutput"]["permissionDecisionReason"], out
+
+
+@pytest.mark.parametrize("command,expect", [
+    ("git commit -m 'skip -n flag'", None),
+    ("git commit -am 'msg'", None),
+    ("git -c core.hooksPath=/dev/null commit -m x", "deny"),
+    ("pip install -e ../evil", "ask"),
+    ("pip install -e .", None),
+], ids=["n-in-message", "am", "hookspath", "editable-path", "editable-self"])
+def test_review_shell_cases(red, state, command, expect):
+    lock_with(red, state)
+    code, out, err = hook(state, "pre-tool", bash(red, command))
+    assert decision(out) == expect, (out, err)
+
+
+def test_guard_without_uv_fails_closed_with_a_message(red, state, tmp_path):
+    lock_with(red, state)
+    code, out, err = hook(state, "pre-tool", edit(red, "pkg/calc.py"), path_env="/usr/bin:/bin")
+    assert code == 2 and "uv is not on PATH" in err, err

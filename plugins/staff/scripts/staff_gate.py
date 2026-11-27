@@ -13,14 +13,17 @@ hashes of the test files and protected config outside the repo and mark the task
 verify <task>: for the locked task, check the locked tests and protected config are unchanged,
 run the trivial checks against the commit at lock time, the locked tests, the suite and diff
 coverage, then write evidence keyed by the working tree's git hash.
+hook <event>: the logic behind the plugin's hooks, reading the hook payload from stdin.
 Exit 0 pass, 1 checks failed, 2 cannot run.
 """
 import argparse
 import ast
+import glob
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -832,6 +835,261 @@ def verify_task(root, cfg, task):
     return 1 if failed else 0
 
 
+# ---- hooks ----------------------------------------------------------------------------------
+# hooks/guard.sh starts this only while some staff task is active on the machine; each check
+# below then applies only to paths in a worktree whose task is active.
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+FILE_TOOLS = {"Edit", "Write", "NotebookEdit"}
+SHELL_TOOLS = {"Bash", "PowerShell", "Monitor"}
+BEST_EFFORT = ("(Shell checks match the command text only, so they are best effort; "
+               "`verify` still checks every locked and protected file by hash.)")
+HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null")
+SEGMENT = re.compile(r"\|\||&&|[;|&\n]")
+WRITE_CMD = re.compile(r"\b(tee|mv|rm|rmdir|dd|truncate|unlink|chmod|touch|patch|shred|xargs)\b"
+                       r"|\b(sed|perl|ruby)\b.*\s-\w*i|\bgit\s+(checkout|restore|rm|mv|apply|am|stash|reset|clean)\b"
+                       r"|\bfind\b.*\s-(delete|exec|execdir|ok)\b")
+COPY_CMD = re.compile(r"\b(cp|install|rsync|ln)\b")  # only the last argument is written
+INLINE_CODE = re.compile(r"\b(python3?|node|ruby|perl|sh|bash|zsh)\b.*\s-[ce]\b")
+INSTALL = re.compile(r"\b(?:pip3?|python3?\s+-m\s+pip|uv\s+pip)\s+install\b(.*)|\b(?:uv|poetry|pdm)\s+add\b(.*)")
+INDEX_OPTS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "-f", "--find-links"}
+COMMIT_VALUE_OPTS = {"-m", "-F", "-C", "-c", "-t", "--message", "--file", "--author", "--date", "--template",
+                     "--reuse-message", "--reedit-message"}
+
+
+def glob_rx(g):
+    """Git `:(glob)` semantics: `**/` spans directories, `*` and `?` don't cross `/`. Case-insensitive,
+    since macOS filesystems are."""
+    out, i = "", 0
+    while i < len(g):
+        if g.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif g.startswith("**", i):
+            out, i = out + ".*", i + 2
+        else:
+            out, i = out + {"*": "[^/]*", "?": "[^/]"}.get(g[i], re.escape(g[i])), i + 1
+    return re.compile(out, re.I)
+
+
+def identity(path):
+    try:
+        st = os.stat(path)  # follows symlinks; on a case-insensitive filesystem any spelling finds the file
+        return st.st_dev, st.st_ino
+    except OSError:
+        return None
+
+
+def same_or_inside(path, d):
+    """path is d or inside d, compared by file identity, so symlinks, `..` and other spellings can't hide it."""
+    target = identity(d)
+    p = Path(os.path.abspath(path))
+    return target is not None and any(identity(q) == target for q in (p, *p.parents))
+
+
+def worktree_of(path):
+    d = path if path.is_dir() else path.parent
+    while not d.exists() and d != d.parent:
+        d = d.parent
+    p = git(d, "rev-parse", "--show-toplevel", check=False)
+    return Path(p.stdout.strip()) if p.returncode == 0 else None
+
+
+def active_task(root):
+    """(task, guard, names) for the worktree's active task, else (None, None, set()).
+    guard(path) says why the path is protected, or None."""
+    m = marker(root)
+    if not m.is_file():
+        return None, None, set()
+    task = m.read_text().strip()
+    try:
+        rec = json.loads((task_dir(root, task) / "contract.json").read_text())
+        locked, prot = set(rec["locked_tests"]), set(rec["protected_config"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Stop(f"active task {task} has no readable lock record ({e}); ask the user.")
+    try:
+        extra = load_config(root).get("protected_config", [])
+    except Stop:
+        extra = []  # the record's hashes still cover the files that existed at lock
+    globs = [glob_rx(g) for g in TOOL_CONFIG + ["**/conftest.py"] + extra]
+    ids = {i: f for f in locked | prot | {CONFIG} if (i := identity(root / f))}
+
+    def guard(path):
+        r = ids.get(identity(path)) or rel(root, path)
+        if r in locked:
+            return (f"{r} is a locked test of task {task}. It changes only after the user's ruling: "
+                    f"write .scratch/{task}/dispute.md saying why, and stop.")
+        if r and (r in prot or r == CONFIG or any(g.fullmatch(r) for g in globs)):
+            return f"{r} is protected config for task {task}. If it must change, ask the user in a message starting NEEDS-INPUT:."
+        return None
+    return task, guard, {Path(f).name for f in locked | prot}
+
+
+def gate_owned(path, or_parent=False):
+    """Why path belongs to the gate (inside the state directory or the plugin), or with or_parent, contains it."""
+    for d, what in ((state_root(), "the gate's state directory"), (PLUGIN_ROOT, "the staff plugin")):
+        if same_or_inside(path, d):
+            return f"{path} is inside {what}, which only the gate writes."
+        if or_parent and same_or_inside(d, path):
+            return f"{path} contains {what}, which only the gate writes."
+    return None
+
+
+def file_denial(path):
+    if why := gate_owned(path):
+        return why
+    root = worktree_of(path.resolve())
+    if root is None:
+        return None
+    task, guard, _ = active_task(root)
+    return guard(path) if task else None
+
+
+def skips_git_hooks(toks):
+    if "--no-verify" in toks or any("core.hookspath" in t.lower() for t in toks):
+        return True
+    if "git" not in toks or "commit" not in toks:
+        return False
+    value_next = False
+    for t in toks[toks.index("commit") + 1:]:
+        if value_next:
+            value_next = False
+        elif t in COMMIT_VALUE_OPTS:
+            value_next = True
+        elif t.startswith("-") and not t.startswith("--"):  # a cluster such as -am or -nm
+            letters = t[1:]
+            cut = min([letters.index(c) for c in "mFCct" if c in letters], default=len(letters))
+            if "n" in letters[:cut]:
+                return True
+            value_next = cut == len(letters) - 1
+    return False
+
+
+def shell_decision(cmd, cwd):
+    """('deny' | 'ask', reason) or None for a shell command run in cwd."""
+    if "STAFF_STATE_DIR" in cmd:
+        return "deny", f"commands may not set or use STAFF_STATE_DIR during a staff task; the gate uses its own state directory. {BEST_EFFORT}"
+    root = worktree_of(cwd)
+    task, guard, names = active_task(root) if root else (None, None, set())
+    home = str(Path.home())
+    owned = [str(state_root().parent).lower(), ".local/share/staff", str(PLUGIN_ROOT).lower()]
+    if INLINE_CODE.search(cmd):  # whole command: quoted code may contain `;` or `|`
+        if hit := next((n for n in owned if n in cmd.lower()), None) or next((n for n in names if n in cmd), None):
+            return "deny", f"inline code names {hit}, a gate-owned, locked or protected path. {BEST_EFFORT}"
+    here, asks = cwd, []
+    for seg in SEGMENT.split(HARMLESS_REDIRECT.sub(" ", cmd)):
+        try:  # punctuation_chars splits `>` from its target and keeps quoted names whole
+            lex = shlex.shlex(seg, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            toks = list(lex)
+        except ValueError:
+            toks = seg.split()
+        if skips_git_hooks(toks):
+            return "deny", f"skipping git hooks (--no-verify, commit -n, core.hooksPath) is not allowed during a staff task. {BEST_EFFORT}"
+        targets = [toks[i + 1] for i, x in enumerate(toks[:-1]) if ">" in x and set(x) <= set("<>&|")]
+        toks = [x for x in toks if not set(x) <= set("<>&|();")]
+        if toks[:1] == ["cd"]:  # later segments run in the new directory
+            d = os.path.expanduser(toks[1].replace("$HOME", home)) if len(toks) > 1 else home
+            here = Path(d) if os.path.isabs(d) else here / d
+            continue
+        writes = bool(WRITE_CMD.search(seg) or COPY_CMD.search(seg))  # redirect targets are checked by identity below
+        if WRITE_CMD.search(seg):
+            targets += toks
+        elif COPY_CMD.search(seg):
+            targets += [a for a in toks if not a.startswith("-")][-1:]
+        if writes and (hit := next((n for n in owned if n in seg.lower()), None)):
+            return "deny", f"this command writes and names {hit}, which only the gate writes. {BEST_EFFORT}"
+        for tok in targets:
+            tok = os.path.expanduser(tok.split("=", 1)[-1].replace("${HOME}", home).replace("$HOME", home))
+            if not tok:
+                continue
+            p = Path(tok) if os.path.isabs(tok) else here / tok
+            for q in [p, *map(Path, glob.glob(str(p)))] if any(c in tok for c in "*?[") else [p]:
+                why = gate_owned(q, or_parent=True)
+                if not why and task:
+                    why = guard(q) or (q.name in names and f"{tok} names a locked or protected file of task {task}.")
+                if why:
+                    return "deny", f"{why} {BEST_EFFORT}"
+        if task and (m := INSTALL.search(seg)):
+            spec = m[1] or m[2] or ""
+            try:
+                args = shlex.split(spec)
+            except ValueError:
+                args = spec.split()
+            asks += install_concerns(args, root, task)
+    if asks:
+        return "ask", "; ".join(asks) + f". {BEST_EFFORT}"
+    return None
+
+def norm_pkg(name):
+    return re.sub(r"[-_.]+", "-", re.split(r"[\[<>=!~;@ ]", name, maxsplit=1)[0]).lower()
+
+
+def install_concerns(args, root, task):
+    rec = json.loads((task_dir(root, task) / "contract.json").read_text())
+    allowed = {norm_pkg(d) for d in rec.get("allowed_new_deps", [])}
+    concerns, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in INDEX_OPTS or a.split("=")[0] in INDEX_OPTS:
+            concerns.append(f"installs from a file or another package index ({a}), which the gate can't check")
+            skip = "=" not in a
+        elif a in ("-e", "--editable"):
+            continue  # its value is checked as a path below
+        elif a.startswith("-"):
+            continue
+        elif a in (".", "./"):
+            continue  # the project itself
+        elif "/" in a or a.startswith("."):
+            concerns.append(f"installs from a path or URL ({a})")
+        elif norm_pkg(a) not in allowed:
+            concerns.append(f"installs {a}, which is not in the contract's allowed new dependencies")
+    return concerns
+
+
+def post_tool_ruff(path):
+    """Feedback from the repo's own ruff commands after a Python edit, or None."""
+    if path.suffix != ".py" or not path.is_file() or not (root := worktree_of(path.resolve())) or not marker(root).is_file():
+        return None
+    try:
+        cfg = load_config(root)
+    except Stop:
+        return None
+    r = rel(root, path)
+    out = []
+    for tool in ("format", "lint"):
+        cmd = cfg.get("tools", {}).get(tool)
+        if cmd and any(Path(a).name == "ruff" for a in cmd):
+            ok, lines = run(root, cmd + [f"./{r}"], head=20)
+            if not ok:
+                out += [f"{' '.join(cmd)}:"] + [f"  {l}" for l in lines]
+    return "\n".join(out) or None
+
+
+def hook(event):
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError as e:
+        raise Stop(f"hook payload is not JSON: {e}")
+    tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
+    cwd = Path(payload.get("cwd") or os.getcwd())
+    raw = (inp.get("file_path") or inp.get("notebook_path")) if isinstance(inp, dict) else None
+    path = (Path(raw) if os.path.isabs(raw) else cwd / raw) if isinstance(raw, str) and raw else None
+    if event == "pre-tool":
+        decision = None
+        if tool in FILE_TOOLS and path:
+            decision = ("deny", why) if (why := file_denial(path)) else None
+        elif tool in SHELL_TOOLS and isinstance(inp.get("command"), str):
+            decision = shell_decision(inp["command"], cwd)
+        if decision:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision[0],
+                                                     "permissionDecisionReason": decision[1]}}))
+    elif event == "post-tool" and tool in FILE_TOOLS and path:
+        if feedback := post_tool_ruff(path):
+            print(json.dumps({"decision": "block", "reason": f"ruff flagged {path.name}; fix it before running the gate:\n{feedback}"}))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="staff_gate.py", description=__doc__.split("\n")[0])
     common = argparse.ArgumentParser(add_help=False)
@@ -844,7 +1102,15 @@ def main(argv=None):
     lk = sub.add_parser("lock", parents=[common], help="prove the contract's tests fail for the right reason, then lock them")
     lk.add_argument("contract", help="path to the draft contract JSON")
     lk.add_argument("--amend", metavar="REASON", help="re-lock a locked task after the user's ruling on a dispute")
+    hk = sub.add_parser("hook", help="hook logic; reads the hook payload from stdin")
+    hk.add_argument("event", choices=["pre-tool", "post-tool"])
     args = ap.parse_args(argv)
+    if args.cmd == "hook":
+        try:
+            return hook(args.event)
+        except Stop as e:
+            print(f"staff gate hook: {e}", file=sys.stderr)
+            return 2  # blocks a PreToolUse call; PostToolUse just shows it
     try:
         top = subprocess.run(["git", "-C", args.repo, "rev-parse", "--show-toplevel"], capture_output=True, text=True, env=clean_env())
         if top.returncode:
