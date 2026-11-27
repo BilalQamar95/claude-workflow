@@ -1,6 +1,6 @@
 """CLI tests for plugins/staff/scripts/staff_gate.py against a throwaway fixture repo.
 
-Run: uv run --python 3.11 --with pytest pytest tests/gate -q
+Run: uv run --python 3.11 --with pytest --with pytest-cov pytest tests/gate -q
 """
 import subprocess
 import sys
@@ -141,9 +141,9 @@ def test_outside_git_stops(tmp_path):
     assert code == 2 and "not a git repository" in out, out
 
 
-def test_verify_without_trivial_is_not_built(repo):
+def test_verify_needs_a_task_or_trivial(repo):
     code, out = gate(repo)
-    assert code == 2 and "only `verify --trivial`" in out, out
+    assert code == 2 and "either the id of a locked task or --trivial" in out, out
 
 
 # Cases from the gate's code review: each was a crash, a bypass or a false positive.
@@ -243,9 +243,9 @@ STUB = CALC + "\n\ndef mul(a, b):\n    raise NotImplementedError\n"
 TEST_MUL = "from pkg.calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
 
 
-def cli(repo, state, *args):
+def cli(repo, state, *args, env=None):
     p = subprocess.run(["uv", "run", "--quiet", "--script", str(GATE), *args], cwd=repo,
-                       capture_output=True, text=True, env={**__import__("os").environ, "STAFF_STATE_DIR": str(state)})
+                       capture_output=True, text=True, env={**__import__("os").environ, "STAFF_STATE_DIR": str(state), **(env or {})})
     return p.returncode, p.stdout + p.stderr
 
 
@@ -446,3 +446,192 @@ def test_assertion_free_test_failing_on_stub_is_rejected(red, state):
     write(red, "tests/test_mul.py", "from pkg.calc import mul\n\n\ndef test_mul():\n    mul(2, 3)\n")
     code, out = cli(red, state, "lock", contract(red))
     assert code == 1 and "has no assertion" in out, out
+
+
+# ---- verify <task> ------------------------------------------------------------------------
+
+IMPL = CALC + "\n\ndef mul(a, b):\n    return a * b\n"
+
+
+def lock_with(repo, state, cfg_lines=""):
+    """Prepend config lines (before [tools]), then lock t-mul."""
+    cfg = repo / ".staff-gate.toml"
+    cfg.write_text(cfg_lines + cfg.read_text())
+    code, out = cli(repo, state, "lock", contract(repo))
+    assert code == 0, out
+    return repo
+
+
+def verify(repo, state):
+    return cli(repo, state, "verify", "t-mul")
+
+
+def task_state(state, repo):
+    return state / "gate/repos" / str(repo).replace("%", "%25").replace("/", "%2F") / "t-mul"
+
+
+def test_clean_implementation_passes_and_writes_evidence(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 0 and "gate: pass" in out and "coverage: not measured" in out, out
+    (ev,) = (task_state(state, red) / "evidence").iterdir()
+    data = json.loads(ev.read_text())
+    assert data["result"] == "pass" and ev.stem == data["tree"] and data["attempt"] == 1
+    assert {c["check"] for c in data["checks"]} >= {"locked tests", "protected config", "scan", "tests", "coverage"}
+
+
+@pytest.mark.parametrize("change,expect", [
+    (lambda r: write(r, "tests/test_mul.py", TEST_MUL.replace("== 6", "== mul(2, 3)")), "tests/test_mul.py: edited since lock"),
+    (lambda r: (r / "tests/test_calc.py").unlink(), "tests/test_calc.py: deleted since lock"),
+    (lambda r: write(r, "pyproject.toml", "[tool.pytest.ini_options]\naddopts = '-k nothing'\n"), "pyproject.toml: added since lock"),
+    (lambda r: write(r, "tests/conftest.py", "collect_ignore = ['test_mul.py']\n"), "tests/conftest.py: added since lock"),
+], ids=["edited-test", "deleted-test", "new-pyproject", "new-conftest"])
+def test_tampering_fails_before_anything_runs(red, state, change, expect):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    change(red)
+    code, out = verify(red, state)
+    assert code == 1 and expect in out and "tests: not run" in out and "gate: FAIL" in out, out
+
+
+def test_lowered_coverage_threshold_is_flagged_with_diff(red, state):
+    sh(red, "git", "add", "pkg", "tests")
+    sh(red, "git", "commit", "-qm", "stub")
+    write(red, "pytest.ini", "[pytest]\n")
+    sh(red, "git", "add", "pytest.ini")
+    sh(red, "git", "commit", "-qm", "ini")
+    lock_with(red, state, "coverage_threshold = 90\n")
+    cfg = red / ".staff-gate.toml"
+    cfg.write_text(cfg.read_text().replace("coverage_threshold = 90", "coverage_threshold = 0"))
+    write(red, "pytest.ini", "[pytest]\naddopts = -p no:randomly\n")
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 1 and ".staff-gate.toml: changed since lock" in out, out
+    assert "pytest.ini: changed since lock" in out and "+addopts = -p no:randomly" in out, out
+
+
+def test_special_cased_literal_is_flagged(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    if a == 2 and b == 3:\n        return 6\n    return 0\n")
+    code, out = verify(red, state)
+    assert "WARN literals" in out and "compares with 2" in out and "pkg/calc.py:6" in out, out
+
+
+def test_coverage_below_threshold_fails_and_lists_lines(red, state):
+    lock_with(red, state, "coverage_threshold = 100\n")
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    if a < 0:\n        return -mul(-a, b)\n    return a * b\n")
+    code, out = verify(red, state)
+    assert code == 1 and "FAIL coverage" in out and "pkg/calc.py: lines 7 not run" in out, out
+
+
+def test_coverage_meeting_threshold_passes(red, state):
+    lock_with(red, state, "coverage_threshold = 100\n")
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 0 and "ok   coverage: diff coverage 100.0%" in out, out
+
+
+def test_coverage_without_pytest_cov_is_not_measured(red, state):
+    cfg = red / ".staff-gate.toml"
+    cfg.write_text(cfg.read_text().replace('"no:cacheprovider",', '"no:cacheprovider", "-p", "no:pytest_cov",'))
+    lock_with(red, state, "coverage_threshold = 100\n")
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 0 and "coverage: not measured: pytest-cov is not installed" in out, out
+
+
+def test_evidence_is_per_tree(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    assert verify(red, state)[0] == 0
+    write(red, "pkg/calc.py", IMPL.replace("a * b", "a + b"))
+    code, out = verify(red, state)
+    assert code == 1, out
+    results = {json.loads(f.read_text())["result"] for f in (task_state(state, red) / "evidence").iterdir()}
+    assert results == {"pass", "fail"}
+
+
+def test_third_failure_in_a_row_writes_blocker(red, state):
+    lock_with(red, state)
+    for i in range(3):
+        write(red, "pkg/calc.py", CALC + f"\n\ndef mul(a, b):\n    return a + b + 10 + {i}\n")
+        code, out = verify(red, state)
+        assert code == 1 and ("BLOCKED" in out) == (i == 2), out
+    blocker = (task_state(state, red) / "blocker.md").read_text()
+    assert blocker.count("## Failure") == 3 and "locked tests run" in blocker
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 2 and "is blocked" in out, out
+
+
+def test_pass_resets_the_failure_streak(red, state):
+    lock_with(red, state)
+    for impl in (IMPL.replace("a * b", "a + b"), IMPL, IMPL.replace("a * b", "a - b"), IMPL.replace("a * b", "b - a")):
+        write(red, "pkg/calc.py", impl)
+        code, out = verify(red, state)
+        assert "BLOCKED" not in out, out
+    assert not (task_state(state, red) / "blocker.md").exists()
+
+
+def test_test_that_writes_into_the_tree_fails(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    write(red, "tests/test_write.py", "from pathlib import Path\n\n\ndef test_w():\n    Path('written.txt').write_text('x')\n    assert Path('written.txt').exists()\n")
+    code, out = verify(red, state)
+    assert code == 1 and "working tree changed while the gate ran" in out, out
+
+
+@pytest.mark.parametrize("args,expect", [
+    (("verify", "t-mul"), "not the active task"),
+    (("verify", "../x"), "not a task id"),
+    (("verify", "t-mul", "--base", "HEAD"), "--base is for --trivial only"),
+    (("verify", "t-mul", "--trivial"), "either the id"),
+])
+def test_verify_task_refuses_bad_calls(red, state, args, expect):
+    code, out = cli(red, state, *args)
+    assert code == 2 and expect in out, out
+
+
+# Cases from the verify code review: each gave a pass with wrong code, or crashed.
+EVIL_INI = "[pytest]\naddopts = -k nothing_matches\n"
+
+
+@pytest.mark.parametrize("rel,ignore", [(".pytest.ini", False), ("tests/pytest.ini", False), ("pytest.ini", True)])
+def test_new_pytest_config_anywhere_is_flagged(red, state, rel, ignore):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    return 0\n")
+    write(red, rel, EVIL_INI)
+    if ignore:
+        with open(red / ".git/info/exclude", "a") as f:
+            f.write(rel + "\n")
+    code, out = verify(red, state)
+    assert code == 1 and f"{rel}: added since lock" in out and "+addopts = -k nothing_matches" in out, out
+
+
+def test_caller_environment_cannot_steer_the_tests(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    code, out = cli(red, state, "verify", "t-mul", env={"PYTEST_ADDOPTS": "-p no_such_plugin_xyz", "PYTHONPATH": "/nowhere",
+                                                        "GIT_INDEX_FILE": "/nowhere/index", "COVERAGE_PROCESS_START": "/x"})
+    assert code == 0 and "gate: pass" in out, out
+
+
+def test_skip_worktree_file_is_flagged(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    return 0\n")
+    sh(red, "git", "add", "pkg/calc.py")
+    sh(red, "git", "update-index", "--skip-worktree", "pkg/calc.py")
+    write(red, "pkg/calc.py", IMPL)
+    code, out = verify(red, state)
+    assert code == 1 and "pkg/calc.py: marked skip-worktree" in out, out
+
+
+def test_record_missing_a_key_stops_without_traceback(red, state):
+    lock_with(red, state)
+    rec_path = task_state(state, red) / "contract.json"
+    rec = json.loads(rec_path.read_text())
+    del rec["locked_tests"]
+    rec_path.write_text(json.dumps(rec))
+    code, out = verify(red, state)
+    assert code == 2 and "unreadable" in out and "Traceback" not in out, out

@@ -12,6 +12,10 @@ test_roots = ["tests"]
 # .coveragerc, CI workflows, every conftest.py) and this file.
 protected_config = ["app/settings*.py"]
 
+# Minimum percent of changed source lines the tests must run. Needs pytest-cov in the test
+# environment; without this key, or without pytest-cov, coverage is reported as not measured.
+# coverage_threshold = 80
+
 # Only tools this repo already uses; delete the rest. The changed .py files are appended.
 [tools]
 format = ["uv", "run", "ruff", "format", "--check"]

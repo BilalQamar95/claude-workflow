@@ -10,6 +10,9 @@ changed tool config, run the format, lint and type tools the repo's gate config 
 changed Python files, then run the tests.
 lock <contract.json>: require each contract test to fail for the right reason, then record
 hashes of the test files and protected config outside the repo and mark the task active.
+verify <task>: for the locked task, check the locked tests and protected config are unchanged,
+run the trivial checks against the commit at lock time, the locked tests, the suite and diff
+coverage, then write evidence keyed by the working tree's git hash.
 Exit 0 pass, 1 checks failed, 2 cannot run.
 """
 import argparse
@@ -18,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +31,7 @@ from pathlib import Path
 
 CONFIG = ".staff-gate.toml"
 TOOLS = ("format", "lint", "typecheck")
-KNOWN_KEYS = {"test_command", "test_roots", "tools", "protected_config"}
+KNOWN_KEYS = {"test_command", "test_roots", "tools", "protected_config", "coverage_threshold"}
 EXAMPLE = f"""Create {CONFIG} in the repo root, for example:
 
     test_command = ["uv", "run", "pytest", "-q"]
@@ -42,11 +46,12 @@ then git-exclude it: run scripts/stack.sh <repo> from the claude-workflow checko
 
 # Files that change how tests, lint or types behave. shortcut: fixed list for the trivial
 # mode; the contract mode takes protected-config globs from the gate config.
-TOOL_CONFIG = ["pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini", "ruff.toml", ".ruff.toml",
-               "mypy.ini", ".mypy.ini", ".coveragerc", ".gitattributes", ".pre-commit-config.yaml",
-               ".github/workflows/*", "noxfile.py"]
+TOOL_CONFIG = ["**/pyproject.toml", "**/setup.cfg", "**/pytest.ini", "**/.pytest.ini", "**/tox.ini",
+               "**/ruff.toml", "**/.ruff.toml", "**/mypy.ini", "**/.mypy.ini", "**/.coveragerc",
+               "**/.gitattributes", ".pre-commit-config.yaml", ".github/workflows/*", "noxfile.py"]
 # Ignored untracked files that Python or pytest load on their own.
 AUTOLOAD = ["*conftest.py", "*sitecustomize.py", "*usercustomize.py", "*.pth"]
+VENDORED = re.compile(r"(^|/)(\.?venv[^/]*|site-packages|\.tox|\.nox|node_modules)/")
 
 SUPPRESSIONS = [
     (re.compile(r"\bmark\.(skip|skipif|xfail)\b|\b(skip|xfail|importorskip)\(|SkipTest|@skip|\.skipTest\(", re.I), "skip/xfail"),
@@ -63,8 +68,15 @@ class Stop(Exception):
     """Cannot run: exit 2 with this message."""
 
 
-def git(root, *args, check=True):
-    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+def clean_env(**extra):
+    """The caller's environment minus what can steer git, Python, pytest or coverage from outside the repo.
+    The agent runs the gate, so its environment is untrusted."""
+    drop = ("GIT_", "PYTHON", "PYTEST_", "COV_", "COVERAGE_")
+    return {**{k: v for k, v in os.environ.items() if not k.startswith(drop)}, **extra}
+
+
+def git(root, *args, check=True, env=None):
+    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env or clean_env())
     if check and p.returncode:
         raise Stop(f"git {' '.join(args)} failed: {p.stderr.strip()}")
     return p
@@ -94,6 +106,9 @@ def load_config(root):
     globs = cfg.get("protected_config", [])
     if not (isinstance(globs, list) and all(isinstance(g, str) and g for g in globs)):
         raise Stop(f"{CONFIG}: protected_config must be a list of glob strings")
+    thr = cfg.get("coverage_threshold")
+    if thr is not None and not (isinstance(thr, (int, float)) and not isinstance(thr, bool) and 0 <= thr <= 100):
+        raise Stop(f"{CONFIG}: coverage_threshold must be a number from 0 to 100")
     return cfg
 
 
@@ -118,18 +133,33 @@ def changed_python(root, base):
     return {f: a for f, a in files.items() if (root / f).is_file() and not (root / f).is_symlink()}
 
 
-def repo_checks(root, base):
+def repo_checks(root, base, tool_config=True):
     """Findings about the tree as a whole: staging, tool config, autoloaded ignored files."""
     findings = []
     both = set(zlist(root, "diff", "--name-only", "-z")) & set(zlist(root, "diff", "--cached", "--name-only", "-z"))
     findings += [f"{f}: staged and unstaged changes differ, so a commit may not match what was checked; `git add` it or unstage it" for f in sorted(both)]
-    cfg = set(zlist(root, "diff", "--name-only", "-z", "--no-renames", base, "--", *TOOL_CONFIG))
-    cfg |= set(zlist(root, "ls-files", "-z", "--others", "--exclude-standard", "--", *TOOL_CONFIG))
-    findings += [f"{f}: tool config changed (it can weaken tests, lint or types); ask the user if this is intended" for f in sorted(cfg)]
-    for f in zlist(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *AUTOLOAD):
-        if not re.search(r"(^|/)(\.?venv[^/]*|site-packages|\.tox|\.nox)/", f):
-            findings.append(f"{f}: git-ignored file that Python or pytest loads automatically")
+    # Skip-worktree and assume-unchanged files are invisible to git diff and git add.
+    for e in zlist(root, "ls-files", "-v", "-z"):
+        if e[0] == "S" or e[0].islower():
+            flag = "skip-worktree" if e[0] == "S" else "assume-unchanged"
+            findings.append(f"{e[2:]}: marked {flag}, so git can't see its changes; clear it with `git update-index --no-{flag}`")
+    if tool_config:  # a locked task checks config by hash instead
+        specs = globbed(TOOL_CONFIG)
+        cfg = set(zlist(root, "diff", "--name-only", "-z", "--no-renames", base, "--", *specs))
+        cfg |= set(zlist(root, "ls-files", "-z", "--others", "--exclude-standard", "--", *specs)) | ignored(root, specs)
+        findings += [f"{f}: tool config changed (it can weaken tests, lint or types); ask the user if this is intended" for f in sorted(cfg)]
+    findings += [f"{f}: git-ignored file that Python or pytest loads automatically" for f in sorted(ignored(root, AUTOLOAD))]
     return findings
+
+
+def globbed(patterns):
+    return [f":(glob){g}" for g in patterns]
+
+
+def ignored(root, specs):
+    """Git-ignored files matching the pathspecs, outside virtualenvs and tool caches."""
+    return {f for f in zlist(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *specs)
+            if not VENDORED.search(f)}
 
 
 def is_test(path, test_roots):
@@ -220,18 +250,22 @@ def scan(root, files, test_roots):
     return findings
 
 
-def run(root, cmd, head=None, tail=None):
+def run(root, cmd, head=None, tail=None, env=None):
     try:
-        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True, errors="replace")
+        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True, errors="replace", env=env or clean_env())
     except OSError as e:
         return False, [f"cannot run {cmd[0]}: {e}"]
     out = (p.stdout + p.stderr).strip().splitlines()
     return p.returncode == 0, out[:head] if head else out[-tail:] if tail else out
 
 
-def report(name, findings, advice):
+LOG = []  # every check's outcome, in order, for the evidence file
+
+
+def report(name, findings, advice, detail=""):
+    LOG.append({"check": name, "status": "fail" if findings else "ok", "lines": list(findings) or ([detail] if detail else [])})
     if not findings:
-        print(f"ok   {name}")
+        print(f"ok   {name}{': ' + detail if detail else ''}")
         return False
     print(f"FAIL {name}: {len(findings)} finding(s)")
     print("\n".join(f"  {f}" for f in findings))
@@ -239,29 +273,37 @@ def report(name, findings, advice):
     return True
 
 
+def note(name, why):
+    LOG.append({"check": name, "status": "not run", "lines": [why]})
+    print(f"--   {name}: {why}")
+
+
+def run_tools(root, cfg, files):
+    failed = False
+    paths = [f"./{f}" for f in files]  # ./ so a file name can't read as a tool option
+    for tool in TOOLS:
+        cmd = cfg.get("tools", {}).get(tool)
+        if not cmd:
+            note(tool, "not configured")
+        elif not paths:
+            note(tool, "no changed Python files")
+        else:
+            ok, out = run(root, cmd + paths, head=20)
+            failed |= report(tool, [] if ok else out, f"fix these, then rerun the gate (command: {' '.join(cmd)} <files>).")
+    return failed
+
+
 def verify_trivial(root, cfg, base):
     files = changed_python(root, base)
     failed = report("repo", repo_checks(root, base), "fix the files named above, or ask the user.")
     failed |= report("scan", scan(root, files, cfg.get("test_roots", ["tests"])),
                      "remove the suppression or shortcut and fix the cause. If a test or rule is wrong, tell the user instead.")
-
-    paths = [f"./{f}" for f in files]  # ./ so a file name can't read as a tool option
-    for tool in TOOLS:
-        cmd = cfg.get("tools", {}).get(tool)
-        if not cmd:
-            print(f"--   {tool}: not configured")
-        elif not paths:
-            print(f"--   {tool}: no changed Python files")
-        else:
-            ok, out = run(root, cmd + paths, head=20)
-            failed |= report(tool, [] if ok else out, f"fix these, then rerun the gate (command: {' '.join(cmd)} <files>).")
-
+    failed |= run_tools(root, cfg, files)
     if failed:
-        print("--   tests: not run until the checks above pass")
+        note("tests", "not run until the checks above pass")
     else:
         ok, out = run(root, cfg["test_command"], tail=30)
         failed |= report("tests", [] if ok else out, f"fix the cause, then rerun the gate (command: {' '.join(cfg['test_command'])}).")
-
     print("gate: FAIL" if failed else "gate: pass")
     return 1 if failed else 0
 
@@ -383,8 +425,7 @@ def run_with_report(root, cfg, refs):
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, "staff_gate_report.py").write_text(REPORT_PLUGIN)
         report = Path(tmp, "report.jsonl")
-        env = {**os.environ, "STAFF_GATE_REPORT": str(report),
-               "PYTHONPATH": os.pathsep.join(filter(None, [tmp, os.environ.get("PYTHONPATH")]))}
+        env = clean_env(STAFF_GATE_REPORT=str(report), PYTHONPATH=tmp)
         try:
             p = subprocess.run(cfg["test_command"] + ["-p", "staff_gate_report", *refs], cwd=root, env=env,
                                capture_output=True, text=True, errors="replace")
@@ -428,6 +469,12 @@ def why_not_red(root, test_roots, recs):
     return None
 
 
+def for_ref(records, ref):
+    """The report records for one ref: its parametrized variants, children, and collection errors."""
+    return [r for r in records if r["node"] == ref or r["node"].startswith((ref + "[", ref + "::"))
+            or (r["when"] == "collect" and ref.startswith(r["node"]))]
+
+
 def check_refs(root, cfg, refs):
     """{ref: (ok, why)} from one pytest run of all refs."""
     records, out = run_with_report(root, cfg, refs)
@@ -436,8 +483,7 @@ def check_refs(root, cfg, refs):
     test_roots = cfg.get("test_roots", ["tests"])
     results = {}
     for ref in refs:
-        recs = [r for r in records if r["node"] == ref or r["node"].startswith((ref + "[", ref + "::"))
-                or (r["when"] == "collect" and ref.startswith(r["node"]))]
+        recs = for_ref(records, ref)
         why = why_not_red(root, test_roots, recs)
         msgs = sorted({r["message"].splitlines()[0] for r in recs if r["when"] == "call" and r["message"]})
         results[ref] = (why is None, why or "; ".join(msgs)[:200])
@@ -488,9 +534,9 @@ COMPUTED = {"locked_tests", "protected_config", "locked_at", "head_at_lock", "am
 
 
 def protected(root, cfg):
-    globs = TOOL_CONFIG + ["**/conftest.py"] + cfg.get("protected_config", [])
-    files = set(zlist(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-                      *[f":(glob){g}" for g in globs])) | {CONFIG}
+    specs = globbed(TOOL_CONFIG + ["**/conftest.py"] + cfg.get("protected_config", []))
+    files = set(zlist(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *specs))
+    files |= ignored(root, specs) | {CONFIG}
     return {f: sha(root / f) for f in sorted(files)}
 
 
@@ -555,28 +601,265 @@ def lock(root, cfg, contract_path, amend):
     return 0
 
 
+# ---- verify <task> ------------------------------------------------------------------------
+
+BLOCK_AFTER = 3
+COMMON_LITERALS = {(type(None), None), (int, 0), (int, 1), (str, ""), (type(...), ...)}  # too common to mean anything
+
+
+def tree_hash(root):
+    """The git tree `git add -A` would commit now, built in a copy of the index so the real one is untouched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        idx = Path(tmp, "index")
+        real = Path(git(root, "rev-parse", "--path-format=absolute", "--git-path", "index").stdout.strip())
+        if real.is_file():
+            shutil.copyfile(real, idx)  # keeps the stat cache, so unchanged files aren't re-hashed
+        env = clean_env(GIT_INDEX_FILE=str(idx))
+        git(root, "add", "-A", env=env)
+        return git(root, "write-tree", env=env).stdout.strip()
+
+
+def locked_literals(root, refs):
+    """Constants used inside the locked test functions, minus the common ones."""
+    found = set()
+    for ref in refs:
+        f = root / ref.split("::")[0]
+        if not f.is_file():
+            continue
+        lines = ref_lines(root, ref)
+        found |= {n.value for n in ast.walk(ast.parse(read(f))) if isinstance(n, ast.Constant) and n.lineno in lines}
+    return {v for v in found if (type(v), v) not in COMMON_LITERALS}
+
+
+def special_cased(root, files, test_roots, literals):
+    """Added comparisons in source that use a locked test's literal. shortcut: comparisons only,
+    not `match` cases or dict lookups; widen if pilots show special-casing in other forms."""
+    findings = []
+    for path, added in sorted(files.items()):
+        if is_test(path, test_roots):
+            continue
+        try:
+            tree = ast.parse(read(root / path))
+        except SyntaxError:
+            continue  # the scan reports it
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare) and node.lineno in added:
+                hits = sorted({repr(c.value) for c in ast.walk(node) if isinstance(c, ast.Constant) and c.value in literals})
+                if hits:
+                    findings.append(f"{path}:{node.lineno}: compares with {', '.join(hits)} from the locked tests: {ast.unparse(node)}")
+    return findings
+
+
+def warn(name, findings, advice):
+    LOG.append({"check": name, "status": "warn" if findings else "ok", "lines": findings})
+    if not findings:
+        print(f"ok   {name}")
+        return
+    print(f"WARN {name}: {len(findings)} finding(s)")
+    print("\n".join(f"  {f}" for f in findings))
+    print(f"  next: {advice}")
+
+
+def config_findings(root, cfg, old, base):
+    """old: {path: sha} of the protected config at lock."""
+    now = protected(root, cfg)
+    findings = []
+    for f in sorted(set(old) | set(now)):
+        if old.get(f) != now.get(f):
+            findings.append(f"{f}: {'added' if f not in old else 'deleted' if now.get(f) is None else 'changed'} since lock")
+            diff = git(root, "diff", "--no-color", "--no-ext-diff", "--text", base, "--", f, check=False).stdout.splitlines()
+            if not diff and now.get(f):  # untracked or ignored: show the file itself
+                diff = [f"+{l}" for l in read(root / f).split("\n")]
+            findings += [f"  {l}" for l in diff[:20]]
+    return findings
+
+
+def locked_test_results(root, cfg, refs):
+    """Run the locked tests through the report plugin; every phase of every variant must pass."""
+    records, out = run_with_report(root, cfg, refs)
+    bad = []
+    for ref in refs:
+        recs = for_ref(records, ref)
+        if not any(r["when"] == "call" for r in recs):
+            bad.append(f"{ref}: did not run")
+        for r in recs:
+            if r["outcome"] != "passed" or r["xfail"]:
+                msg = r["message"].strip().splitlines()[0] if r["message"].strip() else ""
+                bad.append(f"{r['node']}: {r['when']} {'xfail' if r['xfail'] else r['outcome']}: {msg}")
+    return bad + ([f"  {l}" for l in out[-15:]] if bad else [])
+
+
+def diff_coverage(root, files, test_roots, data):
+    """(percent, measured, uncovered findings) over the added lines of changed source files."""
+    by_file = {rel(root, root / k): v for k, v in data.get("files", {}).items()}
+    measured = covered = 0
+    findings = []
+    for path, added in sorted(files.items()):
+        if is_test(path, test_roots):
+            continue
+        d = by_file.get(path)
+        if d is None:  # never imported by a test: count its added code lines as missed
+            lines = read(root / path).split("\n")
+            missed = sorted(n for n in added if n <= len(lines) and lines[n - 1].strip() and not lines[n - 1].strip().startswith("#"))
+            hit = 0
+        else:
+            stmts, run_ = set(d["executed_lines"]) | set(d["missing_lines"]), set(d["executed_lines"])
+            missed, hit = sorted(added & stmts - run_), len(added & run_)
+        measured += hit + len(missed)
+        covered += hit
+        if missed:
+            findings.append(f"{path}: lines {', '.join(map(str, missed[:30]))}{' ...' if len(missed) > 30 else ''} not run by any test")
+    return (100.0 * covered / measured if measured else 100.0), measured, findings
+
+
+def run_suite(root, cfg, files):
+    """Check 5's suite run plus check 6. Returns True if anything failed."""
+    test_roots, thr = cfg.get("test_roots", ["tests"]), cfg.get("coverage_threshold")
+    with tempfile.TemporaryDirectory() as tmp:
+        cov = Path(tmp, "coverage.json")
+        env = clean_env(COVERAGE_FILE=str(Path(tmp, ".coverage")))  # keep coverage data out of the tree
+        cmd = cfg["test_command"] + (["--cov", "--cov-report=", f"--cov-report=json:{cov}"] if thr is not None else [])
+        ok, out = run(root, cmd, tail=30, env=env)
+        no_cov = thr is not None and not ok and any("unrecognized arguments" in l and "--cov" in l for l in out)
+        if no_cov:
+            ok, out = run(root, cfg["test_command"], tail=30, env=env)
+        failed = report("tests", [] if ok else out, f"fix the code, not the tests, then rerun the gate (command: {' '.join(cfg['test_command'])}).")
+        if thr is None:
+            note("coverage", "not measured: no coverage_threshold in the gate config")
+        elif no_cov:
+            note("coverage", "not measured: pytest-cov is not installed in the test environment")
+        elif not ok:
+            note("coverage", "not run until the tests pass")
+        elif not cov.is_file():
+            note("coverage", "not measured: the test run wrote no coverage report")
+        else:
+            pct, measured, missed = diff_coverage(root, files, test_roots, json.loads(cov.read_text()))
+            summary = f"diff coverage {pct:.1f}% of {measured} changed line(s), threshold {thr}"
+            failed |= report("coverage", [summary] + missed if pct < thr else [],
+                             "add tests that run the lines listed (the locked tests stay as they are), then rerun the gate.", detail=summary)
+    return failed
+
+
+def record_attempt(d, task, tree, failed):
+    """Write evidence for this tree, count the attempt, and write the blocker note on the third failure in a row."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        att = json.loads((d / "attempts.json").read_text())
+    except (OSError, ValueError):
+        att = {"total": 0, "streak": []}
+    att["total"] += 1
+    if failed:
+        att["streak"].append({"at": now, "tree": tree, "failed": [
+            f"{e['check']}: {e['lines'][0].strip() if e['lines'] else ''}" for e in LOG if e["status"] == "fail"]})
+    else:
+        att["streak"] = []
+    evidence = d / "evidence" / f"{tree}.json"
+    write_atomic(evidence, json.dumps({"task": task, "tree": tree, "result": "fail" if failed else "pass",
+                                       "attempt": att["total"], "at": now, "checks": LOG}, indent=2) + "\n")
+    write_atomic(d / "attempts.json", json.dumps(att, indent=2) + "\n")
+    blocker = None
+    if len(att["streak"]) >= BLOCK_AFTER:
+        blocker = d / "blocker.md"
+        parts = [f"# Blocked: {task}\n\nThe gate failed {len(att['streak'])} times in a row. What failed each time:\n"]
+        for i, s in enumerate(att["streak"], 1):
+            parts.append(f"## Failure {i} ({s['at']}, tree {s['tree'][:12]})\n\n" + "\n".join(f"- {f}" for f in s["failed"]) + "\n")
+        parts.append("The user decides the next step: a different approach, a dispute about a locked test, or dropping the task.\n")
+        write_atomic(blocker, "\n".join(parts))
+    return evidence, att, blocker
+
+
+def verify_task(root, cfg, task):
+    if not TASK_ID.fullmatch(task):
+        raise Stop(f"not a task id: {task!r}")
+    d, m = task_dir(root, task), marker(root)
+    active = m.read_text().strip() if m.is_file() else None
+    if active != task:
+        raise Stop(f"{task} is not the active task in this worktree (active: {active or 'none'}); lock it first.")
+    if (d / "blocker.md").exists():
+        raise Stop(f"{task} is blocked after repeated failures: show the user {d / 'blocker.md'}. "
+                   "Only the user allows more attempts, by deleting that file.")
+    try:
+        rec = json.loads((d / "contract.json").read_text())
+        base, refs = rec["head_at_lock"], [ac["verify"]["ref"] for ac in rec["acceptance"] if ac["verify"]["type"] == "test"]
+        locked, at_lock = dict(rec["locked_tests"]), dict(rec["protected_config"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Stop(f"locked record for {task} is missing or unreadable ({e}); ask the user.")
+    if git(root, "cat-file", "-e", f"{base}^{{commit}}", check=False).returncode:
+        raise Stop(f"the commit at lock time ({base}) is gone from this repo; ask the user.")
+    test_roots = cfg.get("test_roots", ["tests"])
+    tree = tree_hash(root)
+    LOG.clear()
+
+    # 1 and 2: if either fails, nothing from the changed config or tests is run.
+    failed = report("locked tests", [f"{f}: {'deleted' if sha(root / f) is None else 'edited'} since lock"
+                                     for f, h in sorted(locked.items()) if sha(root / f) != h],
+                    f"undo the change. A locked test changes only after the user's ruling: if it is wrong, write "
+                    f".scratch/{task}/dispute.md saying why and stop.")
+    failed |= report("protected config", config_findings(root, cfg, at_lock, base),
+                     "undo the change. If it is needed, ask the user in a message starting NEEDS-INPUT: and stop.")
+    if failed:
+        for name in ("repo", "scan", *TOOLS, "locked tests run", "tests", "coverage"):
+            note(name, "not run until the locked tests and protected config are restored")
+    else:
+        files = changed_python(root, base)
+        failed |= report("repo", repo_checks(root, base, tool_config=False), "fix the files named above, or ask the user.")
+        failed |= report("scan", scan(root, files, test_roots),
+                         "remove the suppression or shortcut and fix the cause. If a test or rule is wrong, tell the user instead.")
+        warn("literals", special_cased(root, files, test_roots, locked_literals(root, refs)),
+             "if the code special-cases a test input, implement the general behaviour instead. Otherwise leave it: the packet shows this for review.")
+        failed |= run_tools(root, cfg, files)
+        if failed:
+            for name in ("locked tests run", "tests", "coverage"):
+                note(name, "not run until the checks above pass")
+        else:
+            failed |= report("locked tests run", locked_test_results(root, cfg, refs),
+                             "fix the code, not the tests, then rerun the gate.")
+            if failed:
+                note("tests", "not run until the locked tests pass")
+                note("coverage", "not run until the locked tests pass")
+            else:
+                failed |= run_suite(root, cfg, files)
+
+    if tree_hash(root) != tree:
+        failed |= report("tree", ["the working tree changed while the gate ran (a test or tool writes files?)"],
+                         "make the run leave the tree unchanged, or git-ignore what it writes, then rerun the gate.")
+    evidence, att, blocker = record_attempt(d, task, tree, failed)
+    print(f"evidence: {evidence}")
+    if blocker:
+        print(f"gate: BLOCKED after {len(att['streak'])} failures in a row. Stop and show the user {blocker}; don't try again.")
+    else:
+        print(f"gate: {'FAIL' if failed else 'pass'} (attempt {att['total']}, tree {tree[:12]})")
+    return 1 if failed else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="staff_gate.py", description=__doc__.split("\n")[0])
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--repo", default=".", help="any path inside the repo (default: current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", parents=[common], help="run the gate checks")
+    v.add_argument("task", nargs="?", help="id of the locked task to verify")
     v.add_argument("--trivial", action="store_true", help="no contract: checks on uncommitted changes")
-    v.add_argument("--base", default="HEAD", help="compare against this commit (default HEAD)")
+    v.add_argument("--base", help="with --trivial: compare against this commit (default HEAD)")
     lk = sub.add_parser("lock", parents=[common], help="prove the contract's tests fail for the right reason, then lock them")
     lk.add_argument("contract", help="path to the draft contract JSON")
     lk.add_argument("--amend", metavar="REASON", help="re-lock a locked task after the user's ruling on a dispute")
     args = ap.parse_args(argv)
     try:
-        top = subprocess.run(["git", "-C", args.repo, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        top = subprocess.run(["git", "-C", args.repo, "rev-parse", "--show-toplevel"], capture_output=True, text=True, env=clean_env())
         if top.returncode:
             raise Stop(f"not a git repository: {args.repo}")
         root = Path(top.stdout.strip())
         cfg = load_config(root)
         if args.cmd == "lock":
             return lock(root, cfg, args.contract, args.amend)
-        if not args.trivial:
-            raise Stop("only `verify --trivial` exists so far; contract verify is not built yet.")
+        if args.trivial == bool(args.task):
+            raise Stop("give either the id of a locked task or --trivial.")
+        if args.task:
+            if args.base:
+                raise Stop("--base is for --trivial only; a task compares against the commit at lock time.")
+            return verify_task(root, cfg, args.task)
+        args.base = args.base or "HEAD"
         base = git(root, "rev-parse", "--verify", "--end-of-options", f"{args.base}^{{commit}}", check=False)
         if base.returncode:
             raise Stop(f"not a commit: {args.base}")
