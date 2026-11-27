@@ -174,5 +174,6 @@ Whether a PreToolUse deny holds in auto mode and inside subagents is not confirm
 - Order of work: merge `stage1.1` after its pilot task; reviewer agents; gate `lock` and `verify` with the fixture; hooks; packet; router and skill changes; sandbox and `stack.sh` changes; this repo's CI; latency measurement; pilot.
 - Cost baseline from pilot 2: trivial about $1 and 2 minutes, standard about $5 and 8 minutes, critical about $11 and 33 minutes, reviews about 70% of cost. Targets after 2a: standard median at most $7 and 12 minutes. All numbers are guesses to adjust from real data.
 - Proof bar: ten real tasks logged before standard drops to contract-plus-packet review; two escaped defects in those ten return it to diff reading.
-- Open facts the pilot must settle: PreToolUse deny in auto mode and subagents; sandbox in headless runs; whether a subagent can run the bundled `security-review` skill (stage 1.1 depends on it).
+- Open facts the pilot must settle: PreToolUse deny in auto mode and subagents; sandbox in headless runs. Settled by pilot 3 (2026-11-27): a general-purpose subagent can run the bundled `security-review` skill.
+- Pilot 3 showed tests and implementation written before any red run in the standard tier; the lock step's red check is what fixes that.
 - Client-repo specs always go through the configured local-markdown tracker; this repo keeps its specs in `docs/superpowers/specs/` because it is the workflow's own repo.
