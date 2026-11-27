@@ -617,7 +617,7 @@ def lock(root, cfg, contract_path, amend):
         before = {**old.get("locked_tests", {}), **old.get("protected_config", {})}
         after = {**record["locked_tests"], **record["protected_config"]}
         fields = sorted(k for k in set(c) | set(old) if k not in COMPUTED and c.get(k) != old.get(k))
-        record["amendments"].append({"at": now, "reason": amend,
+        record["amendments"].append({"at": now, "reason": amend, "dispute": sha(root / ".scratch" / task / "dispute.md"),
                                      "changed": sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f)),
                                      "contract_changes": {k: {"before": old.get(k), "after": c.get(k)} for k in fields},
                                      "outcomes": {r: why for r, (_, why) in results.items()}})
@@ -1206,12 +1206,14 @@ def active_task(root):
     globs = [glob_rx(g) for g in TOOL_CONFIG + ["**/conftest.py"] + extra]
     ids = {i: f for f in locked | prot | {CONFIG} if (i := identity(root / f))}
 
-    def guard(path):
+    def guard(path, amendable=False):
+        """amendable: a locked test may change (the test author during a dispute), protected config still may not."""
         r = ids.get(identity(path)) or rel(root, path)
-        if r in locked:
+        is_prot = bool(r) and (r in prot or r == CONFIG or any(g.fullmatch(r) for g in globs))
+        if r in locked and not (amendable and not is_prot):
             return (f"{r} is a locked test of task {task}. It changes only after the user's ruling: "
                     f"write .scratch/{task}/dispute.md saying why, and stop.")
-        if r and (r in prot or r == CONFIG or any(g.fullmatch(r) for g in globs)):
+        if is_prot:
             return f"{r} is protected config for task {task}. If it must change, ask the user in a message starting NEEDS-INPUT:."
         return None
     return task, guard, {Path(f).name for f in locked | prot}
@@ -1227,14 +1229,21 @@ def gate_owned(path, or_parent=False):
     return None
 
 
-def file_denial(path):
+TEST_AUTHOR = "staff:test-author"
+
+
+def file_denial(path, agent=None):
+    """Why a file tool may not write path, or None. The test-author agent may amend a locked test while a
+    dispute is open; until the user re-locks with --amend, `verify` fails on the changed hash."""
     if why := gate_owned(path):
         return why
     root = worktree_of(path.resolve())
     if root is None:
         return None
     task, guard, _ = active_task(root)
-    return guard(path) if task else None
+    if not task:
+        return None
+    return guard(path, amendable=agent == TEST_AUTHOR and open_dispute(root, task_dir(root, task), task))
 
 
 def skips_git_hooks(toks):
@@ -1263,6 +1272,9 @@ def shell_decision(cmd, cwd):
         return "deny", f"commands may not set or use STAFF_STATE_DIR during a staff task; the gate uses its own state directory. {BEST_EFFORT}"
     if "staff_gate" in cmd and "--dr" in cmd:  # also a prefix argparse would take
         return "deny", f"only the user drops a staff task, from their own terminal; ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}"
+    if "staff_gate" in cmd and "--am" in cmd:
+        return "deny", (f"only the user re-locks after a ruling, from their own terminal, once they have read the changed test; "
+                        f"ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}")
     root = worktree_of(cwd)
     task, guard, names = active_task(root) if root else (None, None, set())
     home = str(Path.home())
@@ -1395,11 +1407,15 @@ def stop_reasons(root):
 
 
 def open_dispute(root, d, task):
-    """A non-empty dispute written since the last lock; a re-lock after the user's ruling closes it."""
+    """A non-empty dispute written since the last lock; a re-lock after the user's ruling closes it, and the
+    amendment records the dispute's hash, so a future mtime can't keep the same dispute open."""
     f = root / ".scratch" / task / "dispute.md"
     try:
-        return f.is_file() and f.stat().st_size > 0 and f.stat().st_mtime > (d / "contract.json").stat().st_mtime
-    except OSError:
+        if not (f.is_file() and f.stat().st_size > 0 and f.stat().st_mtime > (d / "contract.json").stat().st_mtime):
+            return False
+        answered = {a.get("dispute") for a in json.loads((d / "contract.json").read_text()).get("amendments", [])}
+        return sha(f) not in answered
+    except (OSError, ValueError, AttributeError):
         return False
 
 
@@ -1449,7 +1465,7 @@ def hook(event):
         note_transcript(payload)
         decision = None
         if tool in FILE_TOOLS and path:
-            decision = ("deny", why) if (why := file_denial(path)) else None
+            decision = ("deny", why) if (why := file_denial(path, payload.get("agent_type"))) else None
         elif tool in SHELL_TOOLS and isinstance(inp.get("command"), str):
             decision = shell_decision(inp["command"], cwd)
         if decision:
@@ -1470,7 +1486,8 @@ def main(argv=None):
     v.add_argument("task", nargs="?", help="id of the locked task to verify")
     v.add_argument("--trivial", action="store_true", help="no contract: checks on uncommitted changes")
     v.add_argument("--base", help="with --trivial: compare against this commit (default HEAD)")
-    lk = sub.add_parser("lock", parents=[common], help="prove the contract's tests fail for the right reason, then lock them")
+    lk = sub.add_parser("lock", parents=[common], help="prove the contract's tests fail for the right reason, then lock them",
+                        allow_abbrev=False)
     lk.add_argument("contract", help="path to the draft contract JSON")
     lk.add_argument("--amend", metavar="REASON", help="re-lock a locked task after the user's ruling on a dispute")
     pk = sub.add_parser("packet", parents=[common], help="render the evidence packet and end the active task", allow_abbrev=False)

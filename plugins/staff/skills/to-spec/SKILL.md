@@ -18,6 +18,36 @@ Check with the user that these seams match their expectations.
 
 3. Write the spec using the template below, then publish it to the project issue tracker. Apply the `ready-for-agent` triage label - no need for additional triage.
 
+4. Write the draft contract (below) next to the spec, at `.scratch/<feature-slug>/contract.json`. Its `id` is the feature slug: lowercase letters, digits, `.`, `_` or `-`, starting with a letter or digit. It lives in `.scratch/` whatever the tracker, because it is a workflow file and never gets committed. A separate test-author agent writes the tests from it, and the gate locks them before any implementation exists, so the criteria are what "done" means for this task.
+
+<contract-template>
+
+```json
+{
+  "id": "<feature-slug>",
+  "tier": "standard or critical, as the router classified it",
+  "goal": "One sentence: what the change achieves for the user.",
+  "non_goals": ["What this task deliberately leaves out."],
+  "acceptance": [
+    {"id": "AC1", "statement": "Observable behaviour, testable from outside.",
+     "verify": {"type": "test", "ref": "tests/path/test_file.py::test_name"}},
+    {"id": "AC2", "statement": "Something no automated test can show.",
+     "verify": {"type": "manual", "reason": "Why it can't be automated, and how the user checks it."}}
+  ],
+  "invariants": ["What must stay true, such as existing behaviour that must not change."],
+  "failure_modes": ["How it can fail, and what it should do then."],
+  "slices": [{"id": "S1", "acs": ["AC1"]}],
+  "allowed_new_deps": []
+}
+```
+
+</contract-template>
+
+- One criterion per behaviour, each matching a row of the spec's acceptance table. Prefer `test`; use `manual` only when a test can't show it, because manual criteria end up in the packet as things the user must check. At least one criterion must be a `test`, or there is nothing to lock.
+- A `test` ref names a test that doesn't exist yet, under the repo's test roots (`test_roots` in `.staff-gate.toml`), at the seam agreed in step 2.
+- `allowed_new_deps` lists every package the implementation may add. Installing anything else during the task asks the user.
+- For a bug, the first criterion is the reported failure, stated as the correct behaviour, so its test reproduces the bug.
+
 <spec-template>
 
 ## Problem Statement
@@ -55,6 +85,10 @@ A list of implementation decisions that were made. This can include:
 Do NOT include specific file paths or code snippets. They may end up being outdated very quickly.
 
 Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts, not a working demo, just the important bits.
+
+## Acceptance Criteria
+
+A table with one row per criterion in the draft contract: `ID | Statement | Check (test ref, or manual and why)`. These rows define done for the task, so word each as behaviour a user or caller can observe.
 
 ## Testing Decisions
 

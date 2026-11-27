@@ -1,6 +1,6 @@
 # Reviews before the PR
 
-Run these after the tier's implement step, on committed work. `<base>` is the default branch. Run the tier's whole list through to the secret scan in one go: a review's report is input for the next step, never the end of your turn, so don't stop to ask whether to continue. Stop only where a step says to ask the user.
+Run these after the tier's implement step, on committed work. `<base>` is the default branch. Run the tier's whole list through to the secret scan in one go: a review's report is input for the next step, never the end of your turn, so don't stop to ask whether to continue. Stop only where a step says to ask the user. While a gate task is locked, every such question starts with `NEEDS-INPUT:`, or the Stop hook blocks it.
 
 Fix rounds, at most 2:
 1. Round 1: after each review, fix its real findings, rerun the project tests and commit the fixes, then go to the next step.

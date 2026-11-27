@@ -2,6 +2,7 @@
 
 Run: uv run --python 3.11 --with pytest --with pytest-cov pytest tests/gate -q
 """
+import os
 import subprocess
 import sys
 import textwrap
@@ -913,6 +914,9 @@ def test_dispute_closes_at_relock_and_must_be_a_real_file(red, state):
     assert code == 0, out
     code, out, err = hook(state, "stop", stop(red))
     assert out and out["decision"] == "block", (out, err)
+    future = (red / ".scratch/t-mul/dispute.md").stat().st_mtime + 10 ** 6
+    os.utime(red / ".scratch/t-mul/dispute.md", (future, future))  # the answered dispute stays closed
+    assert hook(state, "stop", stop(red))[1]["decision"] == "block"
 
 
 @pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"])
@@ -1151,3 +1155,21 @@ def test_stale_bytecode_cannot_stand_in_for_the_code(red, state):
     __import__("os").utime(red / "pkg/calc.py", ns=(st.st_atime_ns, st.st_mtime_ns))  # same mtime, same size
     code, out = verify(red, state)
     assert code == 0, out
+
+
+def test_only_the_test_author_amends_a_locked_test_and_only_during_a_dispute(red, state):
+    write(red, "tests/conftest.py", "")  # locked (under the test roots) and protected
+    lock_with(red, state)
+    as_author = {**edit(red, "tests/test_mul.py"), "agent_type": "staff:test-author"}
+    assert decision(hook(state, "pre-tool", as_author)[1]) == "deny"  # no dispute yet
+    write(red, ".scratch/t-mul/dispute.md", "test_mul expects the wrong sign\n")
+    assert decision(hook(state, "pre-tool", as_author)[1]) is None
+    for other in ({**as_author, "agent_type": "test-author"}, edit(red, "tests/test_mul.py"),
+                  {**edit(red, "tests/pytest.ini", "Write"), "agent_type": "staff:test-author"},
+                  {**edit(red, "tests/conftest.py"), "agent_type": "staff:test-author"}):
+        assert decision(hook(state, "pre-tool", other)[1]) == "deny", other
+    for flag in ("--amend", "--am"):  # only the user re-locks
+        _, out, _ = hook(state, "pre-tool", bash(red, f"uv run --script {GATE} lock {contract(red)} {flag} 'ruled'"))
+        assert decision(out) == "deny" and "only the user re-locks" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    code, out = cli(red, state, "lock", contract(red), "--am", "abbreviated")
+    assert code == 2 and "unrecognized arguments" in out, out
