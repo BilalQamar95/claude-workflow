@@ -34,7 +34,7 @@ Codex is off user-wide; a repo enables it with `claude plugin enable codex@opena
 
 ## Targeted checks
 
-Read `git diff --stat <base>...HEAD` and the touched paths. If a named plugin is not installed, say so and skip that check. End with one line per check below: `targeted checks: <check> ran` or `targeted checks: <check> not triggered`.
+Read `git diff --stat <base>...HEAD` and the touched paths. If a named plugin is not installed, say so and skip that check. Then print four lines verbatim, one per check, not merged into prose: `targeted checks: supply-chain <ran|not triggered>`, then the same for `sharp-edges`, `insecure-defaults` and `thermo-nuclear`.
 
 - Dependency manifests or lockfiles touched (`package.json`, `*.lock`, `*-lock.*`, `requirements*.txt`, `pyproject.toml`, `go.mod`, `go.sum`, `Cargo.toml`, `Gemfile`, ...): run the `supply-chain-risk-auditor:supply-chain-risk-auditor` skill. Give it `~/.local/share/staff/supply-chain/<repo>/` as its output dir, never a path in the repo. It queries public package registries and GitHub over the network: if the repo uses a private package index, skip it and ask.
 - Settings, config, auth, crypto, deserialization or risky calls touched: run the `sharp-edges:sharp-edges` skill on those files if the diff touches `[tool.*]`, `[build-system]` or `[project.optional-dependencies]` in `pyproject.toml`, `settings.py` or `settings/*.py`, `docker-compose*` or `compose*.y*ml`, `Dockerfile`, `*.ini`, `*.cfg`, `.env.example`, CI workflows, auth or crypto code, or a risky call (shell exec, `eval`, `pickle`, unsafe YAML load, TLS verify off, ...). Any repro code goes under `$TMPDIR`, never in the repo.
