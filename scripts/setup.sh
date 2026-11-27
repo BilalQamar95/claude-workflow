@@ -74,6 +74,14 @@ if ! jq -e --argjson new $deny '($new - (.permissions.deny // [])) == []' $SETTI
   jq_write $SETTINGS '.permissions.deny = ((.permissions.deny // []) as $d | $d + ($new - $d))' --argjson new $deny
   changed+=("settings.json: permissions.deny (secret files)")
 fi
+# Allow reading the staff plugin's own files: the router reads its skill files from this checkout, which is outside
+# the session's working directories, so each read prompted (pilot 2). `//` anchors at the filesystem root. The cache
+# path covers sessions whose plugin root is the installed copy rather than the registered folder.
+allow=$(jq -nc --arg r "Read(/$REPO_ROOT/plugins/staff/**)" '[$r, "Read(~/.claude/plugins/cache/claude-workflow/staff/**)"]')
+if ! jq -e --argjson new $allow '($new - (.permissions.allow // [])) == []' $SETTINGS >/dev/null; then
+  jq_write $SETTINGS '.permissions.allow = ((.permissions.allow // []) as $a | $a + ($new - $a))' --argjson new $allow
+  changed+=("settings.json: permissions.allow (staff plugin files)")
+fi
 # Teach mode: STAFF_OUTPUT_STYLE=Explanatory (or Learning, or a custom style name) sets the user default output style.
 if [[ -n ${STAFF_OUTPUT_STYLE:-} ]] && ! jq -e --arg s $STAFF_OUTPUT_STYLE '.outputStyle == $s' $SETTINGS >/dev/null; then
   jq_write $SETTINGS '.outputStyle = $s' --arg s $STAFF_OUTPUT_STYLE

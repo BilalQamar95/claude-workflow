@@ -1,14 +1,17 @@
 #!/bin/zsh
 # Per-repo stack skills: detects a repo's dependencies, offers the matching rows of stacks/manifest.tsv one by one,
 # and installs the accepted ones at local scope. Every path it writes is git-excluded first; it never commits.
+# Without a terminal it installs nothing and only writes the excludes.
 # Usage: scripts/stack.sh [--dry-run] <repo-path>
 #        scripts/stack.sh --self-test
 set -euo pipefail
 
 MANIFEST=${0:A:h:h}/stacks/manifest.tsv
 SKILLS_CLI=skills@1.9.0
-# Everything the installers below write inside the client repo.
-EXCLUDES=(.claude/settings.local.json .claude/skills/ .agents/skills/ skills-lock.json)
+# Everything the installers below write inside the client repo, then the workflow files /staff:build writes
+# (it checks these with git check-ignore and stops if one is missing; keep the two lists in sync).
+EXCLUDES=(.claude/settings.local.json .claude/skills/ .agents/skills/ skills-lock.json
+  .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ 'CLAUDE-SECURITY-*/')
 
 # Prints "file: <name>" for each dependency file in repo $1, then the file contents, all lowercased.
 haystack() {
@@ -30,7 +33,7 @@ matches() {
   done <$MANIFEST
 }
 
-# Appends each missing EXCLUDES line to exclude file $1 (newline guard + grep -qxF, as in build/SKILL.md).
+# Appends each missing EXCLUDES line to exclude file $1 (newline guard + grep -qxF).
 add_excludes() {
   local p
   mkdir -p ${1:h}
@@ -125,14 +128,17 @@ repo=$(git -C $1 rev-parse --show-toplevel) || { print -u2 "not a git repo: $1";
 for c in jq claude; do command -v $c >/dev/null || { print -u2 "missing prerequisite: $c"; exit 1; }; done
 
 ids=(${(f)"$(matches "$(haystack $repo)")"})
-(( $#ids )) || { print "no stack matches in $repo"; exit 0; }
 
 if (( ! dry )); then
-  for p in .claude/settings.local.json skills-lock.json; do
-    [[ -z $(git -C $repo ls-files -- $p) ]] || { print -u2 "$p is tracked in $repo; refusing to write it"; exit 1; }
-  done
+  # Written first, even with no stack match or a refusal below: /staff:build needs the workflow-file lines and can't
+  # write the common git dir itself. A line for a tracked file has no effect on it.
   add_excludes "$(git -C $repo rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+  print "excludes: ok"
+  for p in .claude/settings.local.json skills-lock.json; do
+    [[ -z $(git -C $repo ls-files -- $p) ]] || { print -u2 "$p is tracked in $repo; refusing to install stack skills"; exit 1; }
+  done
 fi
+(( $#ids )) || { print "no stack matches in $repo"; exit 0; }
 
 installed=() skipped=() failed=()
 # The manifest is read on fd 3 so prompts and installers keep the terminal on stdin.
