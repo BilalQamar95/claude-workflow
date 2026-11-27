@@ -100,6 +100,8 @@ The stage-1 review list stays as it is; slice 2b replaces it with a find, verify
 5. Tests: affected first, then the suite from the gate config.
 6. Diff coverage against the configured threshold, when coverage is available; otherwise "not measured".
 
+Built in ticket 02 (trivial mode), after a code review that reproduced bypasses: file names come from `-z` lists and hunks from per-file diffs with `--text --no-textconv`, so odd paths, faked headers and `-diff` attributes can't hide changes; files with staged and unstaged changes that differ, changed tool config (a fixed list in trivial mode), and git-ignored files Python or pytest load on their own (`conftest.py`, `sitecustomize.py`, `.pth`) are flagged. Known limits of trivial mode: the gate config itself is git-ignored and unprotected until `lock` hashes it; the pattern scan is regex and AST based and can be dodged by code it doesn't model; listing ignored files walks ignored folders, which may be slow in large repos.
+
 Migration checks and eval wiring are later stages (S3 eval wiring is stage 3). Each failure prints the first actionable lines and a next step.
 
 **State layout.** Gate-owned state lives outside the repo under the staff data directory (`~/.local/share/staff/`), per repo and per task: contract record, evidence, attempts, blocker note, rendered packet, raw test output. Agent-writable task files (draft contract, dispute, packet notes) live in the repo's excluded `.scratch/` area next to the spec, so the agent never needs write access outside its working directories. The active-task marker is keyed by the worktree's top-level path, so worktrees of one repo don't share a task by accident.

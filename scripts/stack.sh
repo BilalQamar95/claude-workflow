@@ -11,7 +11,7 @@ SKILLS_CLI=skills@1.9.0
 # Everything the installers below write inside the client repo, then the workflow files /staff:build writes
 # (it checks these with git check-ignore and stops if one is missing; keep the two lists in sync).
 EXCLUDES=(.claude/settings.local.json .claude/skills/ .agents/skills/ skills-lock.json
-  .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ 'CLAUDE-SECURITY-*/')
+  .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ 'CLAUDE-SECURITY-*/' .staff-gate.toml)
 
 # Prints "file: <name>" for each dependency file in repo $1, then the file contents, all lowercased.
 haystack() {

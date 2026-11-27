@@ -1,0 +1,14 @@
+# Gate config for /staff:build (staff_gate.py). Keep it git-excluded (stack.sh does this).
+# Commands are argument lists, run from the repo root without a shell.
+
+# Full test suite.
+test_command = ["uv", "run", "pytest", "-q"]
+
+# Folders whose .py files count as tests (test_*.py, *_test.py and conftest.py count anywhere).
+test_roots = ["tests"]
+
+# Only tools this repo already uses; delete the rest. The changed .py files are appended.
+[tools]
+format = ["uv", "run", "ruff", "format", "--check"]
+lint = ["uv", "run", "ruff", "check"]
+typecheck = ["uv", "run", "mypy"]

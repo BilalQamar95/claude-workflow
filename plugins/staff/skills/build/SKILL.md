@@ -14,9 +14,9 @@ Task: $ARGUMENTS
 - When a step asks for a review fixed point, use the default branch (usually `main`).
 - PR rule: every PR title and body is a plain, client-facing description of the change (what, why, how tested). Leave this workflow out: no tier, hunk list, metrics, labels or skill names. Write PR bodies, commit messages, specs and handoffs in normal prose, never caveman style. This covers every PR, including the draft PR `staff:implement-spec` opens and any PR another followed skill creates.
 - Project config: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `docs/agents/issue-tracker.md`, whichever exist. Read critical paths and the tracker config from them.
-- Shell commands that don't trip permission prompts: run from the repo root and use `git -C <dir>` rather than `cd <dir> && git`; no `VAR=x cmd` or `env -u` prefixes; the Grep and Glob tools rather than `find -exec` or `xargs sh -c`; temp files in your scratchpad directory (or `$TMPDIR`), never `/tmp`; a worktree's virtualenv inside the worktree.
+- Shell commands that don't trip permission prompts: run from the repo root and use `git -C <dir>` rather than `cd <dir> && git`; no `VAR=x cmd` or `env -u` prefixes; the Grep and Glob tools where you have them, otherwise plain `grep` and `find`, never `find -exec` or `xargs sh -c`; temp files in your scratchpad directory (or `$TMPDIR`), never `/tmp`; a worktree's virtualenv inside the worktree.
 - Never `git push` or `gh pr create` without the user's yes in this session.
-- Client repos get no workflow files. The local-markdown tracker writes `.scratch/` (specs, tickets) and `docs/agents/` (tracker docs), setup's domain docs are `GLOSSARY.md`, `GLOSSARY-MAP.md` and `docs/adr/`, and the tracker config goes in `CLAUDE.local.md`. Never `git add` these paths: commits contain only product code and tests.
+- Client repos get no workflow files. The local-markdown tracker writes `.scratch/` (specs, tickets) and `docs/agents/` (tracker docs), setup's domain docs are `GLOSSARY.md`, `GLOSSARY-MAP.md` and `docs/adr/`, the tracker config goes in `CLAUDE.local.md`, and the gate config is `.staff-gate.toml`. Never `git add` these paths: commits contain only product code and tests.
 
 ## 1. Classify the tier
 
@@ -38,10 +38,10 @@ If the task is a bug, run `staff:systematic-debugging` first. The regression tes
 Standard and critical write workflow files, so first check that git ignores them locally. This only reads; never write the exclude file yourself (in a worktree it lives outside the session's directories):
 
 ```bash
-for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ CLAUDE-SECURITY-x/; do git check-ignore -q --no-index -- "$p" || echo "not ignored: $p"; done
+for p in .scratch/ docs/agents/ CLAUDE.local.md GLOSSARY.md GLOSSARY-MAP.md docs/adr/ CLAUDE-SECURITY-x/ .staff-gate.toml; do git check-ignore -q --no-index -- "$p" || echo "not ignored: $p"; done
 ```
 
-If it prints anything, stop and tell the user to run `scripts/stack.sh <repo>` from the claude-workflow checkout (it writes the exclude lines; without a terminal, e.g. through `!`, it installs nothing else), then rerun `/staff:build`. `docs/adr/` and `GLOSSARY.md` are among them: if the client repo already tracks its own ADRs or glossary there, tracked files are unaffected, but new hand-written ADRs there won't show in `git status`.
+If it prints anything, stop and tell the user to run `scripts/stack.sh <repo>` from the claude-workflow checkout (repos set up before the gate existed need this rerun for `.staff-gate.toml`) (it writes the exclude lines; without a terminal, e.g. through `!`, it installs nothing else), then rerun `/staff:build`. `docs/adr/` and `GLOSSARY.md` are among them: if the client repo already tracks its own ADRs or glossary there, tracked files are unaffected, but new hand-written ADRs there won't show in `git status`.
 
 They also need an issue tracker: an `## Agent skills` section in the project config, or `docs/agents/issue-tracker.md`. If neither exists, stop and tell the user to run `/staff:setup-matt-pocock-skills`, pick local markdown, and have it put the `## Agent skills` section in `CLAUDE.local.md` (not the committed `CLAUDE.md`). Then rerun `/staff:build`.
 
@@ -59,9 +59,10 @@ Reviews (standard and critical): follow `${CLAUDE_PLUGIN_ROOT}/skills/build/revi
 
 ### trivial
 
+0. Before any edit: if `.staff-gate.toml` is missing from the repo root, stop and tell the user to copy and edit the one in the claude-workflow Python template (`templates/python/.staff-gate.toml`).
 1. Implement.
-2. Run the project test command (from the project config; ask if none).
-3. `/code-review low` with no target (it covers uncommitted changes, also on the default branch). Fix real findings.
+2. Run the gate: `uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/staff_gate.py" verify --trivial`. It scans the uncommitted diff for suppressions and test shortcuts, flags changed tool config, runs the repo's own format, lint and type tools on changed Python files, then the tests. Exit 1 with a `gate: FAIL` line: fix what it flags and rerun until `gate: pass`. Any other result (exit 2 with `gate: cannot run`, a traceback, command not found): stop and show the user the output; don't change code to work around it. At most three failing runs in total across steps 2 and 3; then stop and tell the user what still fails. Never create or edit `.staff-gate.toml` or add a suppression to get a pass; if a flagged item is legitimate, ask the user.
+3. `/code-review low` with no target (it covers uncommitted changes, also on the default branch). Fix real findings, then rerun the gate.
 4. Commit the change with a plain-prose message, without asking. On the default branch, create a branch first. Don't push.
 
 ### standard
