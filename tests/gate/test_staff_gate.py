@@ -816,3 +816,122 @@ def test_guard_without_uv_fails_closed_with_a_message(red, state, tmp_path):
     lock_with(red, state)
     code, out, err = hook(state, "pre-tool", edit(red, "pkg/calc.py"), path_env="/usr/bin:/bin")
     assert code == 2 and "uv is not on PATH" in err, err
+
+
+# ---- stop hook ----------------------------------------------------------------------------
+
+def stop(repo, **extra):
+    return {"hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": False,
+            "last_assistant_message": "Done.", **extra}
+
+
+def test_stop_without_active_task_starts_no_python(tmp_path, state):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "uv").write_text(f"#!/bin/sh\ntouch {tmp_path / 'uv-ran'}\n")
+    (fake / "uv").chmod(0o755)
+    code, out, err = hook(state, "stop", stop(tmp_path), path_env=f"{fake}:/usr/bin:/bin")
+    assert (code, out, err) == (0, None, "") and not (tmp_path / "uv-ran").exists()
+
+
+def test_stop_without_evidence_blocks(red, state):
+    lock_with(red, state)
+    code, out, err = hook(state, "stop", stop(red))
+    assert code == 0 and out["decision"] == "block" and "no passing gate evidence for the current tree" in out["reason"], (out, err)
+
+
+def test_stop_with_evidence_for_an_older_tree_blocks_and_for_this_tree_allows(red, state):
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    assert verify(red, state)[0] == 0
+    code, out, err = hook(state, "stop", stop(red))
+    assert (code, out) == (0, None), (out, err)
+    write(red, "pkg/calc.py", IMPL + "\n# changed after the gate ran\n")
+    code, out, err = hook(state, "stop", stop(red))
+    assert out and out["decision"] == "block" and "current tree" in out["reason"], (out, err)
+
+
+@pytest.mark.parametrize("setup", [
+    lambda r, s: write(r, ".scratch/t-mul/dispute.md", "test_mul expects the wrong sign\n"),
+    lambda r, s: write(task_state(s, r), "blocker.md", "# Blocked\n"),
+    None,
+], ids=["dispute", "blocker", "needs-input"])
+def test_stop_is_allowed_while_waiting_on_the_user(red, state, setup):
+    lock_with(red, state)
+    msg = "Done."
+    if setup:
+        setup(red, state)
+    else:
+        msg = "  NEEDS-INPUT: should mul accept floats?"
+    code, out, err = hook(state, "stop", stop(red, last_assistant_message=msg))
+    assert (code, out) == (0, None), (out, err)
+
+
+def test_second_stop_in_a_row_is_allowed_with_a_message_for_the_user(red, state):
+    lock_with(red, state)
+    code, out, err = hook(state, "stop", stop(red, stop_hook_active=True))
+    assert code == 0 and "decision" not in out and "no passing gate evidence" in out["systemMessage"], (out, err)
+
+
+def test_stop_does_not_trust_a_removed_marker(red, state):
+    lock_with(red, state)
+    for m in (state / "gate/active").iterdir():
+        m.unlink()
+    code, out, err = hook(state, "stop", stop(red))
+    assert out and out["decision"] == "block" and "not marked active" in out["reason"], (out, err)
+    (task_state(state, red) / "packet.md").write_text("# packet\n")  # a packet ends the task
+    code, out, err = hook(state, "stop", stop(red))
+    assert (code, out) == (0, None), (out, err)
+
+
+def test_stop_in_another_directory_is_not_blocked(red, state, tmp_path):
+    lock_with(red, state)
+    code, out, err = hook(state, "stop", stop(tmp_path))
+    assert (code, out) == (0, None), (out, err)
+
+
+# Cases from the Stop hook review: each let the session stop without passing evidence.
+@pytest.mark.parametrize("where", [
+    lambda r: r / ".git",
+    lambda r: (sh(r, "git", "init", "-q", ".scratch/x"), r / ".scratch/x")[1],
+], ids=["cd-dot-git", "nested-repo"])
+def test_stop_from_inside_the_worktree_still_finds_the_task(red, state, where):
+    lock_with(red, state)
+    (red / ".scratch").mkdir(exist_ok=True)
+    code, out, err = hook(state, "stop", stop(where(red)))
+    assert out and out["decision"] == "block", (out, err)
+
+
+def test_dispute_closes_at_relock_and_must_be_a_real_file(red, state):
+    lock_with(red, state)
+    (red / ".scratch/t-mul/dispute.md").mkdir(parents=True)  # a directory is not a dispute
+    assert hook(state, "stop", stop(red))[1]["decision"] == "block"
+    (red / ".scratch/t-mul/dispute.md").rmdir()
+    write(red, ".scratch/t-mul/dispute.md", "test_mul expects the wrong sign\n")
+    assert hook(state, "stop", stop(red))[1] is None
+    code, out = cli(red, state, "lock", contract(red), "--amend", "user ruled the test is right")
+    assert code == 0, out
+    code, out, err = hook(state, "stop", stop(red))
+    assert out and out["decision"] == "block", (out, err)
+
+
+@pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"])
+def test_stop_blocks_on_files_hidden_from_git(red, state, flag):
+    sh(red, "git", "add", "pkg", "tests")
+    sh(red, "git", "commit", "-qm", "red tests")
+    lock_with(red, state)
+    write(red, "pkg/calc.py", IMPL)
+    sh(red, "git", "add", "pkg/calc.py")
+    assert verify(red, state)[0] == 0
+    sh(red, "git", "update-index", flag, "pkg/calc.py")
+    write(red, "pkg/calc.py", IMPL + "\n# hidden edit\n")
+    code, out, err = hook(state, "stop", stop(red))
+    assert out and out["decision"] == "block" and "pkg/calc.py: marked" in out["reason"], (out, err)
+
+
+def test_stop_without_uv_blocks_once_then_lets_the_session_end(red, state):
+    lock_with(red, state)
+    code, out, err = hook(state, "stop", stop(red), path_env="/usr/bin:/bin")
+    assert code == 2 and "uv is not on PATH" in err, err
+    code, out, err = hook(state, "stop", stop(red, stop_hook_active=True), path_env="/usr/bin:/bin")
+    assert code == 0 and "uv is not on PATH" in err, err

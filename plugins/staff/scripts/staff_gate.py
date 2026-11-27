@@ -141,11 +141,7 @@ def repo_checks(root, base, tool_config=True):
     findings = []
     both = set(zlist(root, "diff", "--name-only", "-z")) & set(zlist(root, "diff", "--cached", "--name-only", "-z"))
     findings += [f"{f}: staged and unstaged changes differ, so a commit may not match what was checked; `git add` it or unstage it" for f in sorted(both)]
-    # Skip-worktree and assume-unchanged files are invisible to git diff and git add.
-    for e in zlist(root, "ls-files", "-v", "-z"):
-        if e[0] == "S" or e[0].islower():
-            flag = "skip-worktree" if e[0] == "S" else "assume-unchanged"
-            findings.append(f"{e[2:]}: marked {flag}, so git can't see its changes; clear it with `git update-index --no-{flag}`")
+    findings += hidden_from_git(root)
     if tool_config:  # a locked task checks config by hash instead
         specs = globbed(TOOL_CONFIG)
         cfg = set(zlist(root, "diff", "--name-only", "-z", "--no-renames", base, "--", *specs))
@@ -153,6 +149,16 @@ def repo_checks(root, base, tool_config=True):
         findings += [f"{f}: tool config changed (it can weaken tests, lint or types); ask the user if this is intended" for f in sorted(cfg)]
     findings += [f"{f}: git-ignored file that Python or pytest loads automatically" for f in sorted(ignored(root, AUTOLOAD))]
     return findings
+
+
+def hidden_from_git(root):
+    """Skip-worktree and assume-unchanged files: git diff and git add (so the tree hash) can't see their changes."""
+    out = []
+    for e in zlist(root, "ls-files", "-v", "-z"):
+        if e[0] == "S" or e[0].islower():
+            flag = "skip-worktree" if e[0] == "S" else "assume-unchanged"
+            out.append(f"{e[2:]}: marked {flag}, so git can't see its changes; clear it with `git update-index --no-{flag}`")
+    return out
 
 
 def globbed(patterns):
@@ -618,7 +624,7 @@ def tree_hash(root):
         if real.is_file():
             shutil.copyfile(real, idx)  # keeps the stat cache, so unchanged files aren't re-hashed
         env = clean_env(GIT_INDEX_FILE=str(idx))
-        git(root, "add", "-A", env=env)
+        git(root, "-c", "core.fsmonitor=false", "add", "-A", env=env)  # a repo-local fsmonitor could hide changes
         return git(root, "write-tree", env=env).stdout.strip()
 
 
@@ -1066,11 +1072,90 @@ def post_tool_ruff(path):
     return "\n".join(out) or None
 
 
+NEEDS_INPUT = "NEEDS-INPUT:"
+
+
+def stop_reasons(root):
+    """Why a session in this worktree may not stop yet: one line per unfinished task. A task is unfinished
+    from lock until its packet; the marker alone isn't trusted, since deleting it would end the task."""
+    tasks = {c.parent.name for c in (state_root() / "repos" / repo_key(root)).glob("*/contract.json")
+             if not (c.parent / "packet.md").exists()}
+    m = marker(root)
+    active = m.read_text().strip() if m.is_file() else None
+    if active:
+        tasks.add(active)
+    if not tasks:
+        return []
+    ask = f"or ask the user in a message starting {NEEDS_INPUT}"
+    out = [f"{h}; {ask}." for h in hidden_from_git(root)]
+    tree = tree_hash(root)
+    for task in sorted(tasks):
+        if not TASK_ID.fullmatch(task):
+            out.append(f"the active-task marker names {task!r}, which is not a task id; {ask}.")
+            continue
+        d = task_dir(root, task)
+        if (d / "blocker.md").is_file() or open_dispute(root, d, task):
+            continue  # waiting on the user, which is a legitimate stop
+        if task != active:
+            out.append(f"task {task} is locked and has no packet, but it is not marked active (was the marker removed?); {ask}.")
+            continue
+        try:
+            passed = json.loads((d / "evidence" / f"{tree}.json").read_text()).get("result") == "pass"
+        except (OSError, ValueError, AttributeError):
+            passed = False
+        if not passed:
+            out.append(f"task {task} has no passing gate evidence for the current tree ({tree[:12]}): run "
+                       f"`verify {task}` until it passes, write .scratch/{task}/dispute.md if a locked test is wrong, {ask}.")
+    return out
+
+
+def open_dispute(root, d, task):
+    """A non-empty dispute written since the last lock; a re-lock after the user's ruling closes it."""
+    f = root / ".scratch" / task / "dispute.md"
+    try:
+        return f.is_file() and f.stat().st_size > 0 and f.stat().st_mtime > (d / "contract.json").stat().st_mtime
+    except OSError:
+        return False
+
+
+def stop_root(cwd):
+    """The worktree a stop belongs to. Ancestors with gate state come first, so `cd .git` or into a nested
+    repo doesn't escape the task (Claude Code already resets a cwd outside the session's directories)."""
+    p = cwd.resolve()
+    for q in (p, *p.parents):
+        try:
+            if marker(q).is_file() or (state_root() / "repos" / repo_key(q)).is_dir():
+                return q
+        except Stop:
+            continue  # path too long for a key, so no state can exist for it
+    return worktree_of(p)
+
+
+def stop_hook(payload):
+    """Stop event output (a dict to print, or None to allow)."""
+    if str(payload.get("last_assistant_message") or "").lstrip().startswith(NEEDS_INPUT):
+        return None
+    try:
+        root = stop_root(Path(payload.get("cwd") or os.getcwd()))
+        reasons = stop_reasons(root) if root else []
+    except Exception as e:  # a crash would let the stop through, so it blocks instead
+        reasons = [f"the gate could not check this worktree: {e}"]
+    if not reasons:
+        return None
+    if payload.get("stop_hook_active"):  # blocked once already: stop rather than loop, and tell the user
+        return {"systemMessage": "staff gate: the session stopped without what an active task needs. " + " ".join(reasons)}
+    return {"decision": "block", "reason": "A staff task is active. " + " ".join(reasons)}
+
+
 def hook(event):
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError as e:
         raise Stop(f"hook payload is not JSON: {e}")
+    if event == "stop":
+        if out := stop_hook(payload):
+            print(json.dumps(out))
+        return 0
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
     cwd = Path(payload.get("cwd") or os.getcwd())
     raw = (inp.get("file_path") or inp.get("notebook_path")) if isinstance(inp, dict) else None
@@ -1103,7 +1188,7 @@ def main(argv=None):
     lk.add_argument("contract", help="path to the draft contract JSON")
     lk.add_argument("--amend", metavar="REASON", help="re-lock a locked task after the user's ruling on a dispute")
     hk = sub.add_parser("hook", help="hook logic; reads the hook payload from stdin")
-    hk.add_argument("event", choices=["pre-tool", "post-tool"])
+    hk.add_argument("event", choices=["pre-tool", "post-tool", "stop"])
     args = ap.parse_args(argv)
     if args.cmd == "hook":
         try:
