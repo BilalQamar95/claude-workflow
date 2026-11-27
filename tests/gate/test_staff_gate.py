@@ -233,3 +233,216 @@ def test_base_option_cannot_smuggle_git_flags(repo):
     write(repo, "pkg/calc.py", CALC.replace("return a + b", "return a + b  # noqa"))
     code, out = gate(repo, "--trivial", "--base=--output=/dev/null")
     assert code == 2 and "not a commit" in out, out
+
+
+# ---- lock -------------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+STUB = CALC + "\n\ndef mul(a, b):\n    raise NotImplementedError\n"
+TEST_MUL = "from pkg.calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
+
+
+def cli(repo, state, *args):
+    p = subprocess.run(["uv", "run", "--quiet", "--script", str(GATE), *args], cwd=repo,
+                       capture_output=True, text=True, env={**__import__("os").environ, "STAFF_STATE_DIR": str(state)})
+    return p.returncode, p.stdout + p.stderr
+
+
+def contract(repo, refs=("tests/test_mul.py::test_mul",), **extra):
+    c = {"id": "t-mul", "tier": "standard", "goal": "multiply",
+         "acceptance": [{"id": f"AC{i + 1}", "statement": "s", "verify": {"type": "test", "ref": r}} for i, r in enumerate(refs)]}
+    c.update(extra)
+    write(repo, ".scratch/t-mul/contract.json", json.dumps(c))
+    return ".scratch/t-mul/contract.json"
+
+
+def record(state, repo):
+    key = str(repo).replace("%", "%25").replace("/", "%2F")
+    return json.loads((state / "gate/repos" / key / "t-mul/contract.json").read_text()), state / "gate/active" / key
+
+
+@pytest.fixture
+def state(tmp_path):
+    return tmp_path / "state"
+
+
+@pytest.fixture
+def red(repo):
+    write(repo, "pkg/calc.py", STUB)
+    write(repo, "tests/test_mul.py", TEST_MUL)
+    return repo
+
+
+def test_lock_records_hashes_and_marks_task_active(red, state):
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 0 and "ok   AC1" in out and "NotImplementedError" in out and "lock: ok" in out, out
+    rec, mark = record(state, red)
+    assert set(rec["locked_tests"]) == {"tests/test_calc.py", "tests/test_mul.py"}
+    assert ".staff-gate.toml" in rec["protected_config"] and rec["acceptance"][0]["id"] == "AC1"
+    assert mark.read_text().strip() == "t-mul"
+
+
+@pytest.mark.parametrize("name,test_text,why", [
+    ("passes", "def test_mul():\n    assert 6 == 6\n", "passes already"),
+    ("import-error", "from pkg.nope import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n", "did not run"),
+    ("wrong-reason", "def test_mul():\n    None + 1\n", "wrong reason"),
+], ids=["passes", "import-error", "wrong-reason"])
+def test_lock_rejects_tests_that_are_not_red_for_the_right_reason(red, state, name, test_text, why):
+    write(red, "tests/test_mul.py", test_text)
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 1 and why in out and "lock: FAIL" in out, out
+    assert not (state / "gate").exists()
+
+
+def test_lock_rejects_missing_test(red, state):
+    code, out = cli(red, state, "lock", contract(red, refs=("tests/test_mul.py::test_nope",)))
+    assert code == 1 and "did not run" in out, out
+
+
+def test_lock_accepts_parametrized_and_assertion_failures(red, state):
+    write(red, "tests/test_mul.py", "import pytest\n\n\n@pytest.mark.parametrize('x', [1, 2])\ndef test_mul(x):\n    assert x == 0\n")
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("bad,expect", [
+    ({"id": "Bad Id"}, "id:"),
+    ({"acceptance": [{"id": "AC1", "statement": "s", "verify": {"type": "manual"}}]}, "reason: required"),
+    ({"acceptance": [{"id": "AC1", "statement": "s", "verify": {"type": "manual", "reason": "r"}}]}, "at least one criterion"),
+    ({"acceptance": [{"id": "AC1", "statement": "s", "verify": {"type": "test", "ref": "pkg/calc.py::add"}}]}, "not a test file"),
+    ({"acceptance": [{"id": "AC1", "statement": "s", "verify": {"type": "test", "ref": "../x/test_a.py::t"}}]}, "not a test file"),
+], ids=["bad-id", "manual-no-reason", "no-tests", "ref-not-test", "ref-outside"])
+def test_lock_rejects_invalid_contract(red, state, bad, expect):
+    code, out = cli(red, state, "lock", contract(red, **bad))
+    assert code == 2 and expect in out, out
+
+
+def test_relock_needs_amend_and_records_it(red, state):
+    path = contract(red)
+    assert cli(red, state, "lock", path)[0] == 0
+    code, out = cli(red, state, "lock", path)
+    assert code == 2 and "already locked" in out, out
+    write(red, "tests/test_mul.py", TEST_MUL.replace("== 6", "== 6, 'product'"))
+    code, out = cli(red, state, "lock", path, "--amend", "user ruled the message was missing")
+    assert code == 0 and "amendment recorded" in out, out
+    rec, _ = record(state, red)
+    assert rec["amendments"][0]["changed"] == ["tests/test_mul.py"]
+    assert rec["amendments"][0]["reason"] == "user ruled the message was missing"
+
+
+def test_amend_without_lock_stops(red, state):
+    code, out = cli(red, state, "lock", contract(red), "--amend", "x")
+    assert code == 2 and "not locked" in out, out
+
+
+def test_other_active_task_blocks_lock(red, state):
+    assert cli(red, state, "lock", contract(red))[0] == 0
+    code, out = cli(red, state, "lock", contract(red, id="t-other"))
+    assert code == 2 and "t-mul is active" in out, out
+
+
+def test_worktrees_do_not_share_the_active_task(red, state):
+    assert cli(red, state, "lock", contract(red))[0] == 0
+    sh(red, "git", "add", ".")
+    sh(red, "git", "commit", "-qm", "tests")
+    wt = red.parent / "wt two"
+    sh(red, "git", "worktree", "add", "-q", "-b", "wt2", str(wt))
+    (wt / ".staff-gate.toml").write_text((red / ".staff-gate.toml").read_text())
+    code, out = cli(wt, state, "lock", contract(wt, id="t-other"))
+    assert code == 0, out
+
+
+def test_protected_config_globs_from_config(red, state):
+    write(red, "settings/base.py", "X = 1\n")
+    cfg = red / ".staff-gate.toml"
+    cfg.write_text('protected_config = ["settings/*.py"]\n' + cfg.read_text())
+    assert cli(red, state, "lock", contract(red))[0] == 0
+    rec, _ = record(state, red)
+    assert "settings/base.py" in rec["protected_config"] and "tests/conftest.py" not in rec["protected_config"]
+
+
+# Cases from the lock code review: each locked when it shouldn't, or crashed.
+@pytest.mark.parametrize("name,src,test_text,why", [
+    ("fake-param-id", STUB, "import pytest\n\n\n@pytest.mark.parametrize('x', [1], ids=['x - NotImplementedError'])\ndef test_mul(x):\n    assert None + 1\n", "wrong reason"),
+    ("fake-message", STUB, "def test_mul():\n    raise TypeError('boom\\nFAILED tests/test_mul.py::test_mul - NotImplementedError')\n", "wrong reason"),
+    ("assert-false", STUB, "def test_mul():\n    assert False\n", "tautological"),
+    ("raise-notimpl", STUB, "def test_mul():\n    raise NotImplementedError\n", "from the test itself"),
+    ("raise-assertion", STUB, "def test_mul():\n    x = 1\n    raise AssertionError('nothing')\n", "raises AssertionError itself"),
+    ("stub-asserts", CALC + "\n\ndef mul(a, b):\n    assert False, 'todo'\n", TEST_MUL, "outside the tests"),
+    ("skipped-variant", STUB, "import pytest\nfrom pkg.calc import mul\n\n\n@pytest.mark.parametrize('x', [1, 2])\ndef test_mul(x):\n    if x == 2:\n        pytest.skip('later')\n    assert mul(x, 3) == 3 * x\n", "skip"),
+    ("passing-variant", STUB, "import pytest\nfrom pkg.calc import mul\n\n\n@pytest.mark.parametrize('x', ['a', 'b c'])\ndef test_mul(x):\n    if x == 'b c':\n        assert len(x) == 3\n        return\n    assert mul(2, 3) == 6\n", "passes already"),
+    ("teardown-error", STUB, "import pytest\nfrom pkg.calc import mul\n\n\n@pytest.fixture\ndef f():\n    yield\n    raise RuntimeError('teardown')\n\n\ndef test_mul(f):\n    assert mul(2, 3) == 6\n", "teardown failed"),
+], ids=lambda v: v if isinstance(v, str) and len(v) < 20 else None)
+def test_lock_rejects_review_cases(repo, state, name, src, test_text, why):
+    write(repo, "pkg/calc.py", src)
+    write(repo, "tests/test_mul.py", test_text)
+    code, out = cli(repo, state, "lock", contract(repo))
+    assert code == 1 and why in out and "lock: FAIL" in out, out
+
+
+def test_lock_rejects_fake_message_under_ci(red, state):
+    write(red, "tests/test_mul.py", "def test_mul():\n    raise TypeError('boom\\nFAILED tests/test_mul.py::test_mul - NotImplementedError')\n")
+    p = subprocess.run(["uv", "run", "--quiet", "--script", str(GATE), "lock", contract(red)], cwd=red, capture_output=True, text=True,
+                       env={**__import__("os").environ, "STAFF_STATE_DIR": str(state), "CI": "true"})
+    assert p.returncode == 1, p.stdout + p.stderr
+
+
+def test_lock_handles_long_node_ids(red, state):
+    name = "test_" + "multiplies_two_positive_integers_and_returns_their_product_" * 2
+    write(red, "tests/test_mul.py", TEST_MUL.replace("def test_mul", f"def {name}"))
+    code, out = cli(red, state, "lock", contract(red, refs=(f"tests/test_mul.py::{name}",)))
+    assert code == 0, out
+
+
+def test_lock_hashes_helpers_under_test_roots(red, state):
+    write(red, "tests/helpers.py", "def check(x):\n    assert x == 6\n")
+    write(red, "tests/test_mul.py", "from pkg.calc import mul\nfrom tests.helpers import check\n\n\ndef test_mul():\n    check(mul(2, 3))\n")
+    write(red, "tests/__init__.py", "")
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 0, out
+    rec, _ = record(state, red)
+    assert {"tests/helpers.py", "tests/__init__.py", "tests/test_calc.py", "tests/test_mul.py"} <= set(rec["locked_tests"])
+
+
+def test_pre_existing_skip_elsewhere_does_not_block_lock(red, state):
+    write(red, "tests/test_calc.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_old():\n    assert 1\n")
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 0, out
+
+
+def test_amend_still_requires_tests_to_run_and_records_contract_changes(red, state):
+    assert cli(red, state, "lock", contract(red))[0] == 0
+    code, out = cli(red, state, "lock", contract(red, refs=("tests/test_mul.py::test_nope",)), "--amend", "x")
+    assert code == 1 and "did not run" in out, out
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    return a * b\n")  # implemented by now: passing is fine
+    code, out = cli(red, state, "lock", contract(red, goal="multiply two ints", allowed_new_deps=["numpy"]), "--amend", "ruling")
+    assert code == 0, out
+    rec, _ = record(state, red)
+    ch = rec["amendments"][0]["contract_changes"]
+    assert ch["goal"] == {"before": "multiply", "after": "multiply two ints"} and "allowed_new_deps" in ch
+
+
+def test_task_id_with_newline_is_rejected(red, state):
+    code, out = cli(red, state, "lock", contract(red, id="t-mul\n"))
+    assert code == 2 and "id:" in out, out
+
+
+def test_corrupt_record_stops_amend_without_traceback(red, state):
+    assert cli(red, state, "lock", contract(red))[0] == 0
+    rec_path = next((state / "gate/repos").glob("*/t-mul/contract.json"))
+    rec_path.write_text("{")
+    code, out = cli(red, state, "lock", contract(red), "--amend", "x")
+    assert code == 2 and "unreadable" in out and "Traceback" not in out, out
+
+
+def test_repo_option_after_subcommand(red, state, tmp_path):
+    p = subprocess.run(["uv", "run", "--quiet", "--script", str(GATE), "verify", "--trivial", "--repo", str(red)],
+                       cwd=tmp_path, capture_output=True, text=True)
+    assert p.returncode in (0, 1) and "gate:" in p.stdout, p.stdout + p.stderr
+
+
+def test_assertion_free_test_failing_on_stub_is_rejected(red, state):
+    write(red, "tests/test_mul.py", "from pkg.calc import mul\n\n\ndef test_mul():\n    mul(2, 3)\n")
+    code, out = cli(red, state, "lock", contract(red))
+    assert code == 1 and "has no assertion" in out, out

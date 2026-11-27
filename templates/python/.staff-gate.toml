@@ -7,6 +7,11 @@ test_command = ["uv", "run", "pytest", "-q"]
 # Folders whose .py files count as tests (test_*.py, *_test.py and conftest.py count anywhere).
 test_roots = ["tests"]
 
+# Extra files whose change can weaken the checks, as git globs. Locking a task hashes these
+# plus the built-in list (pyproject.toml, setup.cfg, pytest.ini, tox.ini, ruff and mypy config,
+# .coveragerc, CI workflows, every conftest.py) and this file.
+protected_config = ["app/settings*.py"]
+
 # Only tools this repo already uses; delete the rest. The changed .py files are appended.
 [tools]
 format = ["uv", "run", "ruff", "format", "--check"]
