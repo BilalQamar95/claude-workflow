@@ -75,7 +75,25 @@ def clean_env(**extra):
     """The caller's environment minus what can steer git, Python, pytest or coverage from outside the repo.
     The agent runs the gate, so its environment is untrusted."""
     drop = ("GIT_", "PYTHON", "PYTEST_", "COV_", "COVERAGE_")
-    return {**{k: v for k, v in os.environ.items() if not k.startswith(drop)}, **extra}
+    return {**{k: v for k, v in os.environ.items() if not k.startswith(drop)},
+            **({"PYTHONPYCACHEPREFIX": str(PYC)} if PYC else {}), **extra}
+
+
+PYC = None  # the gate's bytecode cache, set by fresh_pyc for commands that run the repo's Python
+SKIP_DIRS = re.compile(r"\.?venv[^/]*|site-packages|\.tox|\.nox|node_modules")
+
+
+def fresh_pyc(root):
+    """Point the commands the gate runs at its own bytecode cache, with the repo's own entries cleared.
+    Python trusts a .pyc whose source kept its size within the same mtime second, so a stale or planted
+    one could stand in for the code under test. Installed packages (virtualenvs included) stay cached."""
+    global PYC
+    PYC = state_root() / "pyc"
+    for top in {PYC / Path(os.path.abspath(root)).relative_to("/"), PYC / Path(root).resolve().relative_to("/")}:
+        for d, dirs, files in os.walk(top):
+            dirs[:] = [x for x in dirs if not SKIP_DIRS.fullmatch(x)]
+            for f in files:
+                Path(d, f).unlink(missing_ok=True)
 
 
 def git(root, *args, check=True, env=None):
@@ -764,6 +782,7 @@ def record_attempt(d, task, tree, failed):
         att["streak"] = []
     evidence = d / "evidence" / f"{tree}.json"
     write_atomic(evidence, json.dumps({"task": task, "tree": tree, "result": "fail" if failed else "pass",
+                                       "record": sha(d / "contract.json"),  # a re-lock makes this evidence stale
                                        "attempt": att["total"], "at": now, "checks": LOG}, indent=2) + "\n")
     write_atomic(d / "attempts.json", json.dumps(att, indent=2) + "\n")
     blocker = None
@@ -839,6 +858,274 @@ def verify_task(root, cfg, task):
     else:
         print(f"gate: {'FAIL' if failed else 'pass'} (attempt {att['total']}, tree {tree[:12]})")
     return 1 if failed else 0
+
+
+# ---- packet <task> --------------------------------------------------------------------------
+
+NOTES = {"summary": "Summary", "review results": "Review results", "decisions": "Decisions",
+         "not verified and assumptions": "Not verified and assumptions", "read these hunks": "Read these hunks",
+         "fix rounds": "Fix rounds"}
+LIMITS = [
+    "The evidence is local: the gate ran on this machine, and code under test could still forge results in-process. "
+    "The client CI run, once added, is the independent check.",
+    "The hooks block file tools reliably but match shell commands by text only, so indirect writes (variables, "
+    "scripts written then run, other languages) can slip past them; `verify` still checked every locked and protected file by hash.",
+    "The sandbox, when on, covers Bash and its child processes only; file tools, web fetch, hooks and MCP servers are outside it.",
+    "Mutation testing and property tests: not measured until stage 3.",
+]
+USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def agent_notes(root, task):
+    """Sections of .scratch/<task>/packet-notes.md by `## ` heading."""
+    f = root / ".scratch" / task / "packet-notes.md"
+    if not f.is_file():
+        return {}, f
+    out, cur = {}, None
+    for line in f.read_text(errors="replace").splitlines():
+        if line.startswith("## "):
+            cur = line[3:].strip().lower()
+            if cur not in NOTES:
+                raise Stop(f"{f}: unknown section '{line[3:].strip()}'; use only: {', '.join(NOTES.values())}.")
+            out[cur] = []
+        elif cur:
+            out[cur].append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}, f
+
+
+def parse_time(s):
+    try:
+        t = datetime.fromisoformat(str(s))
+        return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def token_use(d, since):
+    """Token totals since lock from the transcripts of sessions that used a tool during the task, and the
+    number of transcript files read. The transcript format is Claude Code's internal one: best effort."""
+    try:
+        mains = [Path(p) for p in (d / "transcripts.txt").read_text().splitlines() if p]
+    except OSError:
+        return None, 0
+    files = [f for p in mains for f in (p, *sorted(p.with_suffix("").glob("subagents/*.jsonl"))) if f.is_file()]
+    total, seen = dict.fromkeys(USAGE_KEYS, 0), set()
+    for f in files:
+        for line in f.read_text(errors="replace").splitlines():
+            try:
+                e = json.loads(line)
+                msg, at = e["message"], parse_time(e["timestamp"])
+                usage, key = msg["usage"], msg.get("id") or e.get("requestId") or e.get("uuid") or line
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+            key = json.dumps(key)  # ids are strings in practice; anything else must not crash the count
+            if e.get("type") != "assistant" or not at or at < since or key in seen or not isinstance(usage, dict):
+                continue
+            seen.add(key)  # one API response is split over several transcript entries
+            for k in USAGE_KEYS:
+                total[k] += usage.get(k) if isinstance(usage.get(k), int) else 0
+    return total, len(files)
+
+
+def note_transcript(payload):
+    """Remember which session transcripts belong to the active task, for the packet's token count."""
+    t, cwd = payload.get("transcript_path"), payload.get("cwd")
+    if not (isinstance(t, str) and t and isinstance(cwd, str)):
+        return
+    try:
+        root = worktree_of(Path(cwd))
+        if not root or not marker(root).is_file():
+            return
+        f = task_dir(root, marker(root).read_text().strip()) / "transcripts.txt"
+        if t not in (f.read_text().splitlines() if f.is_file() else []):
+            with f.open("a") as fh:
+                fh.write(t + "\n")
+    except (OSError, Stop):
+        pass  # token counting must never block a tool call
+
+
+def ac_status(ac, checks):
+    kind = ac["verify"]["type"]
+    if kind == "manual":
+        return "not verified (manual)"
+    if kind != "test":
+        return f"not measured ({kind} checks come in stage 3)"
+    run = checks.get("locked tests run")
+    if not run or run["status"] == "not run":
+        return "not run"
+    if run["status"] == "ok":
+        return "pass"
+    ref = ac["verify"]["ref"]  # matched as for_ref does, so test_mul doesn't take test_mul_neg's failure
+    return "FAIL" if any(l.startswith((ref + ":", ref + "[", ref + "::")) for l in run["lines"]) else "pass (another locked test failed)"
+
+
+def bullets(lines):
+    return "\n".join(f"- {l}" for l in lines) if lines else "- none"
+
+
+def quoted(text):
+    """Agent-written text as a fenced block, so it can't pose as a heading or table row of the packet."""
+    text = str(text).strip() or "(none given)"
+    fence = "`" * max(3, 1 + max(map(len, re.findall(r"`+", text)), default=0))
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def cell(s):
+    """Contract text on one line with pipes escaped, for tables and the status line."""
+    return " ".join(str(s).split()).replace("|", "\\|")
+
+
+def load_json(path):
+    """A JSON object from a gate file, or None when missing, unreadable or not an object."""
+    try:
+        v = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def current_pass(d, ev):
+    """Evidence that passed against the lock record as it is now, not one from before a re-lock."""
+    return bool(ev) and ev.get("result") == "pass" and ev.get("record") == sha(d / "contract.json")
+
+
+def render_packet(root, task, rec, d, status, ev, notes, notes_path):
+    checks = {c["check"]: c for c in (ev or {}).get("checks", [])}
+    att = load_json(d / "attempts.json") or {}
+    agent = f"*Agent-written, from `{notes_path}`: claims, not measurements.*"
+    say = lambda k: f"{agent}\n\n{quoted(notes.get(k, ''))}"
+    acs = rec.get("acceptance", [])
+    out = [f"# Evidence packet: {task}", "",
+           f"Status: **{status}**. Tier: {cell(rec.get('tier', '?'))}. Goal: {cell(rec.get('goal', ''))}", "",
+           "## Summary", "", say("summary"), "",
+           "## Acceptance matrix", "", "*Measured: from the contract record and the gate's evidence.*", "",
+           "| AC | Statement | Check | Status |", "|---|---|---|---|"]
+    for ac in acs:
+        v = ac["verify"]
+        out.append(f"| {cell(ac['id'])} | {cell(ac['statement'])} | {cell(v['type'] + ': ' + str(v.get('ref') or v.get('reason', '')))} "
+                   f"| {ac_status(ac, checks)} |")
+    out += ["", "## Gate log", "", "*Measured.*", ""]
+    if ev:
+        out += [f"Tree `{ev.get('tree')}`, attempt {ev.get('attempt')} at {ev.get('at')}: **{ev.get('result')}**. "
+                f"Attempts in total: {att.get('total', 0)}.", ""]
+        out += [f"- {c['status']} {c['check']}" + (f": {cell(c['lines'][0])}" if c["lines"] else "") for c in ev.get("checks", [])]
+    else:
+        out.append("No gate run recorded.")
+    cov = checks.get("coverage")
+    out += ["", "## Test strength", "", "*Measured.*", "",
+            f"- Diff coverage: {cell(cov['lines'][0]) if cov and cov['lines'] else 'not measured'}",
+            "- Mutation testing: not measured until stage 3.", "- Property tests: not measured until stage 3.",
+            "", "## Review results", "", say("review results"),
+            "", "## Test amendments and disputes", "", "*Measured: amendments recorded by `lock --amend`.*", ""]
+    out.append(bullets([f"{a['at']}: {cell(a['reason'])} (changed: {', '.join(a['changed']) or 'no files'}"
+                        f"{'; contract: ' + ', '.join(a['contract_changes']) if a.get('contract_changes') else ''})"
+                        for a in rec.get("amendments", [])]))
+    if rec.get("tier") == "critical":
+        out += ["", "## Read these hunks", "", say("read these hunks")]
+    manual = [f"{cell(ac['id'])}: {cell(ac['verify'].get('reason') or ac['statement'])}" for ac in acs if ac["verify"]["type"] == "manual"]
+    warned = [cell(l) for c in checks.values() if c["status"] == "warn" for l in c["lines"]]
+    out += ["", "## Decisions", "", say("decisions"),
+            "", "## Not verified and assumptions", "", "Manual criteria (the user checks these):", "", bullets(manual),
+            "", "Gate warnings left for review:", "", bullets(warned),
+            "", "Limits of this evidence:", "", bullets(LIMITS), "", say("not verified and assumptions")]
+    since = parse_time(rec.get("locked_at"))
+    now = datetime.now(timezone.utc)
+    tokens, n = token_use(d, since) if since else (None, 0)
+    out += ["", "## Cost", "", "*Measured, except fix rounds.*", "",
+            f"- Wall time since lock: {(now - since).total_seconds() / 3600:.1f} h" if since else "- Wall time: unknown",
+            f"- Gate attempts: {att.get('total', 0)}",
+            (f"- Tokens since lock ({n} transcript file(s); Claude Code's internal format, best effort): "
+             + ", ".join(f"{k.replace('_tokens', '').replace('_', ' ')} {v:,}" for k, v in tokens.items())) if tokens
+            else "- Tokens: not measured (no session transcript recorded during the task)",
+            f"- Fix rounds (agent-written): {cell(notes.get('fix rounds') or '(none given)')}", ""]
+    return "\n".join(out)
+
+
+def gh(root, *args):
+    try:
+        return subprocess.run(["gh", *args], cwd=root, capture_output=True, text=True, errors="replace", env=clean_env())
+    except OSError as e:
+        raise Stop(f"gh could not start ({e}); install the GitHub CLI and run `gh auth login`.")
+
+
+def ci_section(root, pr, tree):
+    """The client CI result for a PR whose head commit has exactly the tree the packet vouches for."""
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", pr):
+        raise Stop(f"--ci takes a PR number, not {pr!r}.")
+    p = gh(root, "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid")
+    head = p.stdout.strip()
+    if p.returncode or not re.fullmatch(r"[0-9a-f]{40,64}", head):
+        raise Stop(f"gh pr view {pr} failed: {(p.stderr or p.stdout).strip()[:300]}")
+    t = git(root, "rev-parse", "--verify", "--end-of-options", f"{head}^{{tree}}", check=False)
+    if t.returncode:
+        raise Stop(f"PR {pr}'s head {head[:12]} is not in this repo; fetch it, then rerun.")
+    if t.stdout.strip() != tree:
+        raise Stop(f"PR {pr}'s head {head[:12]} has tree {t.stdout.strip()[:12]}, but the packet vouches for tree {tree[:12]}: "
+                   "the PR is not the change the packet covers.")
+    p = gh(root, "pr", "checks", pr)
+    verdict = {0: "all checks passed", 8: "checks still pending"}.get(p.returncode, f"failing or unavailable (gh exit {p.returncode})")
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    lines = (p.stdout + p.stderr).strip().splitlines()[:40]
+    return "\n".join(["## Client CI", "", f"*Measured: `gh pr checks {pr}` at {at}, PR head {head[:12]} (tree matches the packet): {verdict}.*",
+                      "", quoted("\n".join(lines)), ""])
+
+
+def packet(root, task, drop=None, ci=None):
+    if not TASK_ID.fullmatch(task):
+        raise Stop(f"not a task id: {task!r}")
+    d = task_dir(root, task)
+    out_path, meta_path = d / "packet.md", d / "packet.json"
+    if ci:
+        meta = load_json(meta_path)
+        if not meta or not out_path.is_file():
+            raise Stop(f"{task} has no packet yet; render it first.")
+        text = out_path.read_text()
+        if hashlib.sha256(text.encode()).hexdigest() != meta.get("sha256"):
+            raise Stop(f"{out_path} changed after the gate rendered it; ask the user.")
+        if meta.get("result") != "pass":
+            raise Stop(f"{task} was dropped, so there is no tree to match a PR against.")
+        section = ci_section(root, ci, meta["tree"])
+        write_atomic(d / "ci.md", section)
+        print(text + "\n" + section)
+        print(f"packet: {out_path}\nclient CI: {d / 'ci.md'}")
+        return 0
+    if out_path.exists():
+        raise Stop(f"{task} already has a packet: {out_path}. Use --ci <pr> to add the client CI result.")
+    rec = load_json(d / "contract.json")
+    if not rec:
+        raise Stop(f"{task} has no readable lock record; lock it first.")
+    tree = tree_hash(root)
+    ev = load_json(d / "evidence" / f"{tree}.json")
+    passed = current_pass(d, ev)
+    if drop:
+        status = f"dropped by the user: {cell(drop)}"
+    elif passed:
+        if hidden := hidden_from_git(root):
+            raise Stop("files are hidden from git, so the tree hash can't vouch for them:\n  " + "\n  ".join(hidden))
+        status = "gate passed for the current tree"
+    else:
+        # Blocked or disputed tasks stay active: the Stop hook already lets the session pause for the user.
+        raise Stop(f"no passing gate evidence for the current tree ({tree[:12]}) since the last lock. Run `verify {task}` "
+                   f"until it passes; if a locked test is wrong, write .scratch/{task}/dispute.md and stop. "
+                   "Only the user ends a task without a pass.")
+    if not passed:  # dropped: show the latest run
+        runs = sorted((d / "evidence").glob("*.json"), key=lambda f: f.stat().st_mtime)
+        ev = load_json(runs[-1]) if runs else None
+    notes, notes_path = agent_notes(root, task)
+    if not drop and not notes.get("summary"):
+        raise Stop(f"write the agent sections first: {notes_path} with `## ` sections "
+                   f"{', '.join(NOTES.values())} (Summary is required; Read these hunks for critical tasks).")
+    text = render_packet(root, task, rec, d, status, ev, notes, notes_path)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    write_atomic(out_path, text)
+    write_atomic(meta_path, json.dumps({"tree": tree, "result": "pass" if passed and not drop else "dropped",
+                                        "sha256": digest}, indent=2) + "\n")
+    m = marker(root)
+    if m.is_file() and m.read_text().strip() == task:
+        m.unlink()
+    print(text)
+    print(f"packet: {out_path} (sha256 {digest[:16]})")
+    return 0
 
 
 # ---- hooks ----------------------------------------------------------------------------------
@@ -974,6 +1261,8 @@ def shell_decision(cmd, cwd):
     """('deny' | 'ask', reason) or None for a shell command run in cwd."""
     if "STAFF_STATE_DIR" in cmd:
         return "deny", f"commands may not set or use STAFF_STATE_DIR during a staff task; the gate uses its own state directory. {BEST_EFFORT}"
+    if "staff_gate" in cmd and "--dr" in cmd:  # also a prefix argparse would take
+        return "deny", f"only the user drops a staff task, from their own terminal; ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}"
     root = worktree_of(cwd)
     task, guard, names = active_task(root) if root else (None, None, set())
     home = str(Path.home())
@@ -1099,11 +1388,7 @@ def stop_reasons(root):
         if task != active:
             out.append(f"task {task} is locked and has no packet, but it is not marked active (was the marker removed?); {ask}.")
             continue
-        try:
-            passed = json.loads((d / "evidence" / f"{tree}.json").read_text()).get("result") == "pass"
-        except (OSError, ValueError, AttributeError):
-            passed = False
-        if not passed:
+        if not current_pass(d, load_json(d / "evidence" / f"{tree}.json")):
             out.append(f"task {task} has no passing gate evidence for the current tree ({tree[:12]}): run "
                        f"`verify {task}` until it passes, write .scratch/{task}/dispute.md if a locked test is wrong, {ask}.")
     return out
@@ -1161,6 +1446,7 @@ def hook(event):
     raw = (inp.get("file_path") or inp.get("notebook_path")) if isinstance(inp, dict) else None
     path = (Path(raw) if os.path.isabs(raw) else cwd / raw) if isinstance(raw, str) and raw else None
     if event == "pre-tool":
+        note_transcript(payload)
         decision = None
         if tool in FILE_TOOLS and path:
             decision = ("deny", why) if (why := file_denial(path)) else None
@@ -1176,7 +1462,7 @@ def hook(event):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="staff_gate.py", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="staff_gate.py", description=__doc__.split("\n")[0], allow_abbrev=False)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--repo", default=".", help="any path inside the repo (default: current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1187,6 +1473,10 @@ def main(argv=None):
     lk = sub.add_parser("lock", parents=[common], help="prove the contract's tests fail for the right reason, then lock them")
     lk.add_argument("contract", help="path to the draft contract JSON")
     lk.add_argument("--amend", metavar="REASON", help="re-lock a locked task after the user's ruling on a dispute")
+    pk = sub.add_parser("packet", parents=[common], help="render the evidence packet and end the active task", allow_abbrev=False)
+    pk.add_argument("task", help="id of the locked task")
+    pk.add_argument("--drop", metavar="REASON", help="the user ends the task without passing evidence")
+    pk.add_argument("--ci", metavar="PR", help="add the client CI result (gh pr checks) to an existing packet")
     hk = sub.add_parser("hook", help="hook logic; reads the hook payload from stdin")
     hk.add_argument("event", choices=["pre-tool", "post-tool", "stop"])
     args = ap.parse_args(argv)
@@ -1201,7 +1491,10 @@ def main(argv=None):
         if top.returncode:
             raise Stop(f"not a git repository: {args.repo}")
         root = Path(top.stdout.strip())
+        if args.cmd == "packet":
+            return packet(root, args.task, args.drop, args.ci)
         cfg = load_config(root)
+        fresh_pyc(root)
         if args.cmd == "lock":
             return lock(root, cfg, args.contract, args.amend)
         if args.trivial == bool(args.task):

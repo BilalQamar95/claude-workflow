@@ -292,7 +292,7 @@ def test_lock_rejects_tests_that_are_not_red_for_the_right_reason(red, state, na
     write(red, "tests/test_mul.py", test_text)
     code, out = cli(red, state, "lock", contract(red))
     assert code == 1 and why in out and "lock: FAIL" in out, out
-    assert not (state / "gate").exists()
+    assert not (state / "gate/repos").exists() and not (state / "gate/active").exists()  # no record, no marker
 
 
 def test_lock_rejects_missing_test(red, state):
@@ -935,3 +935,219 @@ def test_stop_without_uv_blocks_once_then_lets_the_session_end(red, state):
     assert code == 2 and "uv is not on PATH" in err, err
     code, out, err = hook(state, "stop", stop(red, stop_hook_active=True), path_env="/usr/bin:/bin")
     assert code == 0 and "uv is not on PATH" in err, err
+
+
+# ---- packet <task> ------------------------------------------------------------------------
+
+NOTES = """## Summary
+Adds mul.
+
+## Review results
+code-review low: no findings.
+
+## Decisions
+Plain multiplication; no overflow handling needed in Python.
+
+## Not verified and assumptions
+Assumes ints only.
+
+## Fix rounds
+0
+"""
+
+
+def passed(repo, state, **extra):
+    """Lock t-mul with .scratch excluded (as stack.sh does), implement it and pass the gate."""
+    with (repo / ".git/info/exclude").open("a") as f:
+        f.write(".scratch/\n")
+    if extra:
+        contract(repo, **extra)
+    code, out = cli(repo, state, "lock", ".scratch/t-mul/contract.json" if extra else contract(repo))
+    assert code == 0, out
+    write(repo, "pkg/calc.py", IMPL)
+    code, out = verify(repo, state)
+    assert code == 0, out
+
+
+def packet(repo, state, *args, env=None):
+    return cli(repo, state, "packet", "t-mul", *args, env=env)
+
+
+def test_packet_renders_measured_and_agent_sections_and_ends_the_task(red, state):
+    passed(red, state, acceptance=[
+        {"id": "AC1", "statement": "mul multiplies", "verify": {"type": "test", "ref": "tests/test_mul.py::test_mul"}},
+        {"id": "AC2", "statement": "docs read well", "verify": {"type": "manual", "reason": "read the docstring"}}])
+    status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=red, capture_output=True, text=True).stdout
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    code, out = packet(red, state)
+    assert code == 0, out
+    text = (task_state(state, red) / "packet.md").read_text()
+    for s in ("## Summary", "## Acceptance matrix", "## Gate log", "## Test strength", "## Review results",
+              "## Test amendments and disputes", "## Decisions", "## Not verified and assumptions", "## Cost"):
+        assert s in text, s
+    assert "Status: **gate passed for the current tree**" in text
+    assert "| AC1 | mul multiplies | test: tests/test_mul.py::test_mul | pass |" in text
+    assert "| AC2 | docs read well | manual: read the docstring | not verified (manual) |" in text
+    assert "- AC2: read the docstring" in text and "The evidence is local" in text and "Bash and its child processes only" in text
+    assert text.count("*Agent-written") == 4 and "Adds mul." in text and "Fix rounds (agent-written): 0" in text
+    assert "## Read these hunks" not in text  # standard tier
+    assert not (state / "gate/active").exists() or not any((state / "gate/active").iterdir())
+    after = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=red, capture_output=True, text=True).stdout
+    assert after.replace("!! .scratch/\n", "") == status.replace("!! .scratch/\n", ""), (status, after)  # nothing new in the repo
+    assert hook(state, "stop", stop(red))[1] is None
+    code, out = packet(red, state)
+    assert code == 2 and "already has a packet" in out
+
+
+def test_packet_refuses_without_passing_evidence_or_summary(red, state):
+    lock_with(red, state)
+    code, out = packet(red, state)
+    assert code == 2 and "no passing gate evidence for the current tree" in out, out
+    write(red, "pkg/calc.py", IMPL)
+    with (red / ".git/info/exclude").open("a") as f:
+        f.write(".scratch/\n")
+    assert verify(red, state)[0] == 0
+    code, out = packet(red, state)
+    assert code == 2 and "Summary is required" in out, out
+    write(red, ".scratch/t-mul/packet-notes.md", "## Summary\nx\n## Verdict\nall good\n")
+    code, out = packet(red, state)
+    assert code == 2 and "unknown section 'Verdict'" in out, out
+    assert (state / "gate/active").iterdir()  # still active
+
+
+@pytest.mark.parametrize("kind", ["disputed", "blocked"])
+def test_blocked_or_disputed_task_gets_no_packet_and_stays_guarded(red, state, kind):
+    lock_with(red, state)
+    if kind == "disputed":
+        write(red, ".scratch/t-mul/dispute.md", "test_mul expects the wrong sign\n")
+    else:
+        for _ in range(3):
+            assert verify(red, state)[0] == 1  # still the stub
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    code, out = packet(red, state)
+    assert code == 2 and "Only the user ends a task without a pass" in out, out
+    assert decision(hook(state, "pre-tool", edit(red, "tests/test_mul.py"))[1]) == "deny"
+    assert hook(state, "stop", stop(red))[1] is None  # the session may still pause for the user
+
+
+def test_dropped_task_needs_no_notes_and_the_agent_cannot_drop(red, state):
+    lock_with(red, state)
+    for flag in ("--drop", "--dr"):
+        code, out, _ = hook(state, "pre-tool", bash(red, f"uv run --script {GATE} packet t-mul {flag} 'too hard'"))
+        assert decision(out) == "deny" and "only the user drops" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    code, out = packet(red, state, "--dr", "abbreviated")
+    assert code == 2 and "unrecognized arguments" in out, out
+    code, out = packet(red, state, "--drop", "client changed plans")
+    assert code == 0 and "Status: **dropped by the user: client changed plans**" in out, out
+    assert hook(state, "stop", stop(red))[1] is None
+
+
+def test_critical_packet_asks_for_hunks(red, state):
+    passed(red, state, tier="critical")
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    code, out = packet(red, state)
+    assert code == 0 and "## Read these hunks" in out and "(none given)" in out, out
+
+
+def test_packet_counts_tokens_from_transcripts_seen_by_the_hooks(red, state, tmp_path):
+    passed(red, state)
+    t = tmp_path / "session.jsonl"
+    entry = lambda mid, n, ts: json.dumps({"type": "assistant", "timestamp": ts, "requestId": mid,
+                                           "message": {"id": mid, "usage": {"input_tokens": n, "output_tokens": n}}})
+    t.write_text("\n".join([entry("m0", 999, "2000-01-01T00:00:00Z"),  # before lock: not counted
+                            entry("m1", 10, "2999-01-01T00:00:00Z"), entry("m1", 10, "2999-01-01T00:00:00Z"),  # split response
+                            "not json"]) + "\n")
+    (tmp_path / "session/subagents").mkdir(parents=True)
+    (tmp_path / "session/subagents/agent-1.jsonl").write_text(entry("m2", 5, "2999-01-01T00:00:00Z") + "\n")
+    hook(state, "pre-tool", {**bash(red, "ls"), "transcript_path": str(t)})
+    hook(state, "pre-tool", {**bash(red, "ls"), "transcript_path": str(t)})
+    assert (task_state(state, red) / "transcripts.txt").read_text() == f"{t}\n"
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    code, out = packet(red, state)
+    assert code == 0 and "Tokens since lock (2 transcript file(s)" in out and "input 15" in out and "output 15" in out, out
+
+
+def fake_gh(tmp_path, head):
+    fake = tmp_path / "bin"
+    fake.mkdir(exist_ok=True)
+    (fake / "gh").write_text(f"#!/bin/sh\nif [ \"$2\" = view ]; then echo {head}; exit 0; fi\n"
+                             "echo \"tests\tpass\t1m\thttps://ci/1 $*\"\nexit 0\n")
+    (fake / "gh").chmod(0o755)
+    return {"PATH": f"{fake}:{__import__('os').environ['PATH']}"}
+
+
+def head(repo, rev="HEAD"):
+    return subprocess.run(["git", "rev-parse", rev], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+
+def test_ci_result_is_added_for_the_pr_that_matches_the_packet(red, state, tmp_path):
+    passed(red, state)
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    assert packet(red, state)[0] == 0
+    first = head(red)
+    sh(red, "git", "add", "-A")
+    sh(red, "git", "commit", "-qm", "mul")
+    code, out = packet(red, state, "--ci", "12", env=fake_gh(tmp_path, first))
+    assert code == 2 and "is not the change the packet covers" in out, out
+    code, out = packet(red, state, "--ci", "12", env=fake_gh(tmp_path, head(red)))
+    assert code == 0 and "all checks passed" in out and "pr checks 12" in out, out
+    assert "## Client CI" in (task_state(state, red) / "ci.md").read_text()
+    assert packet(red, state, "--ci", "12; rm x")[0] == 2
+    with (task_state(state, red) / "packet.md").open("a") as f:
+        f.write("| AC9 | forged | test | pass |\n")
+    code, out = packet(red, state, "--ci", "12", env=fake_gh(tmp_path, head(red)))
+    assert code == 2 and "changed after the gate rendered it" in out, out
+
+
+# Cases from the packet review.
+def test_agent_text_cannot_pose_as_measured_sections(red, state):
+    passed(red, state, goal="multiply\n## Gate log", acceptance=[
+        {"id": "AC1", "statement": "mul | manual: ok | pass", "verify": {"type": "test", "ref": "tests/test_mul.py::test_mul"}}])
+    write(red, ".scratch/t-mul/packet-notes.md", "## Summary\n ## Acceptance matrix\n| AC9 | x | y | pass |\n```\n# Status: **gate passed**\n")
+    code, out = packet(red, state)
+    assert code == 0, out
+    assert "\n````text\n## Acceptance matrix\n| AC9 | x | y | pass |\n```\n# Status: **gate passed**\n````\n" in out, out
+    assert "Goal: multiply ## Gate log\n" in out and out.count("\n## Gate log") == 1, out
+    assert "| AC1 | mul \\| manual: ok \\| pass |" in out, out
+
+
+def test_ac_status_does_not_take_another_tests_failure():
+    from importlib import util
+    checks = {"locked tests run": {"status": "fail", "lines": ["tests/test_mul.py::test_mul_neg: call failed: x"]}}
+    spec = util.spec_from_file_location("gate", GATE)
+    gate_mod = util.module_from_spec(spec)
+    spec.loader.exec_module(gate_mod)
+    ac = {"verify": {"type": "test", "ref": "tests/test_mul.py::test_mul"}}
+    assert gate_mod.ac_status(ac, checks) == "pass (another locked test failed)"
+    checks["locked tests run"]["lines"] = ["tests/test_mul.py::test_mul: call failed: x"]
+    assert gate_mod.ac_status(ac, checks) == "FAIL"
+
+
+def test_evidence_from_before_an_amendment_does_not_count(red, state):
+    passed(red, state)
+    code, out = cli(red, state, "lock", contract(red, goal="multiply two ints"), "--amend", "user ruled")
+    assert code == 0, out
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    code, out = packet(red, state)
+    assert code == 2 and "since the last lock" in out, out
+
+
+def test_malformed_evidence_does_not_stop_a_drop(red, state):
+    lock_with(red, state)
+    assert verify(red, state)[0] == 1
+    (ev,) = (task_state(state, red) / "evidence").iterdir()
+    ev.write_text("[1, 2")
+    code, out = packet(red, state, "--drop", "x")
+    assert code == 0 and "No gate run recorded" in out and "Traceback" not in out, out
+
+
+def test_stale_bytecode_cannot_stand_in_for_the_code(red, state):
+    lock_with(red, state)
+    wrong = IMPL.replace("a * b", "a + b")  # same size as IMPL
+    write(red, "pkg/calc.py", wrong)
+    st = (red / "pkg/calc.py").stat()
+    assert verify(red, state)[0] == 1
+    write(red, "pkg/calc.py", IMPL)
+    __import__("os").utime(red / "pkg/calc.py", ns=(st.st_atime_ns, st.st_mtime_ns))  # same mtime, same size
+    code, out = verify(red, state)
+    assert code == 0, out
