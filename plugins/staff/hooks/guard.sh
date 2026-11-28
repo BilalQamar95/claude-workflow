@@ -11,6 +11,9 @@ gate() {
     [ "$1" = stop ] && grep -q '"stop_hook_active" *: *true' && exit 0
     exit 2
   fi
+  # Hooks run outside the Bash sandbox, which may write uv's usual cache; their own cache keeps code planted
+  # there from running here. It must never be in sandbox.filesystem.allowWrite.
+  export UV_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/staff-hook-uv"
   exec uv run --quiet --script "$(dirname "$0")/../scripts/staff_gate.py" hook "$1"
 }
 for m in "$S/active/"*; do
@@ -18,7 +21,7 @@ for m in "$S/active/"*; do
 done
 if [ "$1" = stop ]; then
   for c in "$S"/repos/*/*/contract.json; do
-    [ -e "$c" ] && [ ! -e "${c%/contract.json}/packet.md" ] && gate stop
+    [ -e "$c" ] && [ ! -f "${c%/contract.json}/packet.md" ] && gate stop
   done
 fi
 exit 0

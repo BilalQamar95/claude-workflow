@@ -44,7 +44,7 @@ Check with the user that these seams match their expectations.
 </contract-template>
 
 - One criterion per behaviour, each matching a row of the spec's acceptance table. Prefer `test`; use `manual` only when a test can't show it, because manual criteria end up in the packet as things the user must check. At least one criterion must be a `test`, or there is nothing to lock.
-- A `test` ref names a test that doesn't exist yet, under the repo's test roots (`test_roots` in `.staff-gate.toml`), at the seam agreed in step 2.
+- A `test` ref names a test that doesn't exist yet, with a name that describes the behaviour (it is committed to the client's repo, so no criterion ids or workflow terms), under the repo's test roots (`test_roots` in `.staff-gate.toml`), at the seam agreed in step 2.
 - `allowed_new_deps` lists every package the implementation may add. Installing anything else during the task asks the user.
 - For a bug, the first criterion is the reported failure, stated as the correct behaviour, so its test reproduces the bug.
 

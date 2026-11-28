@@ -53,7 +53,8 @@ ask() {
 
 # Sets enabledPlugins[$2] = true in repo $1's .claude/settings.local.json, unless already set.
 enable_local() {
-  local f=$1/.claude/settings.local.json t
+  local f=${1:A}/.claude/settings.local.json t
+  f=${f:A}  # a symlinked file is updated where it points, not replaced
   mkdir -p ${f:h}
   [[ -s $f ]] || print '{}' >$f
   jq -e --arg p $2 '.enabledPlugins[$p] == true' $f >/dev/null && return 0
@@ -63,11 +64,13 @@ enable_local() {
 
 # Sandbox for Bash in settings file $1: on, writes also to the staff state dir and uv's cache (uv won't run without a
 # writable cache), and Python package indexes and GitHub pre-allowed; other hosts prompt. Existing entries are kept.
-# shortcut: a sandboxed command can still write uv's cache, which the gate hooks run from outside the sandbox.
-SANDBOX_WRITE=(${STAFF_STATE_DIR:-$HOME/.local/share/staff} $HOME/.cache/uv)
+# autoAllowBashIfSandboxed is pinned to false unless already set: before Claude Code 2.1.324 it defaulted to true,
+# which would run every sandboxed command without a prompt. The gate hooks use their own uv cache (guard.sh), so
+# code written into this one doesn't run outside the sandbox.
+SANDBOX_WRITE=(${STAFF_STATE_DIR:-$HOME/.local/share/staff} ${$(uv cache dir 2>/dev/null):-$HOME/.cache/uv})
 SANDBOX_DOMAINS=(pypi.org files.pythonhosted.org github.com api.github.com)
 sandbox_local() {
-  local f=$1 t
+  local f=${1:A} t
   mkdir -p ${f:h}
   [[ -s $f ]] || print '{}' >$f
   t=$(mktemp $f.XXXXXX) || return 1
@@ -75,7 +78,8 @@ sandbox_local() {
        --argjson d "$(jq -nc '$ARGS.positional' --args $SANDBOX_DOMAINS)" '
       .sandbox.enabled = true
       | .sandbox.filesystem.allowWrite = ((.sandbox.filesystem.allowWrite // []) as $o | $o + ($w - $o))
-      | .sandbox.network.allowedDomains = ((.sandbox.network.allowedDomains // []) as $o | $o + ($d - $o))' $f >$t &&
+      | .sandbox.network.allowedDomains = ((.sandbox.network.allowedDomains // []) as $o | $o + ($d - $o))
+      | .sandbox.autoAllowBashIfSandboxed //= false' $f >$t &&
     mv $t $f; } || { rm -f -- $t; return 1; }
 }
 
@@ -140,8 +144,15 @@ self_test() {
   print '{"enabledPlugins":{"x@y":true},"sandbox":{"filesystem":{"allowWrite":["/keep"]}}}' >$t
   sandbox_local $t; sandbox_local $t
   eq "$(jq -c . $t)" "$(jq -nc --args '{enabledPlugins:{"x@y":true},sandbox:{filesystem:{allowWrite:(["/keep"] + $ARGS.positional[:2])},
-    enabled:true,network:{allowedDomains:$ARGS.positional[2:]}}}' $SANDBOX_WRITE $SANDBOX_DOMAINS)" sandbox
+    enabled:true,network:{allowedDomains:$ARGS.positional[2:]},autoAllowBashIfSandboxed:false}}' $SANDBOX_WRITE $SANDBOX_DOMAINS)" sandbox
   rm -f -- $t
+  # An explicit autoAllowBashIfSandboxed is kept, and a symlinked file is written where it points.
+  t=$(mktemp -d)
+  print '{"sandbox":{"autoAllowBashIfSandboxed":true}}' >$t/real.json
+  ln -s $t/real.json $t/link.json
+  sandbox_local $t/link.json
+  eq "$([[ -L $t/link.json ]] && jq -c .sandbox.autoAllowBashIfSandboxed $t/real.json)" true sandbox-explicit-and-symlink
+  rm -f -- $t/real.json $t/link.json && rmdir -- $t
   (( fails == 0 )) && print "self-test: ok" || { print -u2 "self-test: $fails failed"; return 1; }
 }
 
@@ -164,9 +175,14 @@ if (( ! dry )); then
   for p in .claude/settings.local.json skills-lock.json; do
     [[ -z $(git -C $repo ls-files -- $p) ]] || { print -u2 "$p is tracked in $repo; refusing to install stack skills"; exit 1; }
   done
-  print "sandbox: Bash may write only the repo, temp, $SANDBOX_WRITE; network to $SANDBOX_DOMAINS pre-allowed, other hosts prompt"
+  print "sandbox: Bash may write only the directory Claude Code starts in, temp, $SANDBOX_WRITE; network to $SANDBOX_DOMAINS pre-allowed, other hosts prompt"
   if ask "turn on the Bash sandbox for this repo?" y; then
     sandbox_local $repo/.claude/settings.local.json && print "sandbox: on" || { print -u2 "sandbox: failed"; exit 1; }
+    mkdir -p -- $SANDBOX_WRITE  # on Linux an allowWrite entry for a missing path has no effect
+    main=${$(git -C $repo rev-parse --path-format=absolute --git-common-dir):h}
+    if [[ ${main:A} != ${repo:A} ]] && jq -e '.sandbox | has("enabled")' $main/.claude/settings.local.json >/dev/null 2>&1; then
+      print -u2 "sandbox: $main/.claude/settings.local.json also sets sandbox.enabled; in this worktree Claude Code uses that value"
+    fi
     [[ $(uname) != Linux ]] || command -v bwrap socat >/dev/null ||
       print -u2 "sandbox: needs bubblewrap and socat on Linux, or Claude Code runs commands unsandboxed"
   else

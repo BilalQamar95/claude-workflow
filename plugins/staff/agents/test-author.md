@@ -19,7 +19,7 @@ The caller gives you the path of a draft contract (`.scratch/<task>/contract.jso
 
 ## 2. Write
 
-For each criterion whose `verify.type` is `test`, write the test named by its `ref` (`path::test_name`, or `path::Class::test_name`) at exactly that path and name. Skip `manual` and `eval` criteria.
+For each criterion whose `verify.type` is `test`, write the test named by its `ref` (`path::test_name`, or `path::Class::test_name`) at exactly that path and name. Skip `manual` and `eval` criteria. The tests are committed to the client's repo, so names, docstrings and comments describe behaviour: no criterion ids and no workflow terms (contract, gate, lock).
 
 Each test must fail now for the right reason, because the gate's `lock` step rejects any other failure:
 

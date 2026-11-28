@@ -80,24 +80,25 @@ def clean_env(**extra):
 
 
 PYC = None  # the gate's bytecode cache, set by fresh_pyc for commands that run the repo's Python
-SKIP_DIRS = re.compile(r"\.?venv[^/]*|site-packages|\.tox|\.nox|node_modules")
 
 
 def fresh_pyc(root):
     """Point the commands the gate runs at its own bytecode cache, with the repo's own entries cleared.
     Python trusts a .pyc whose source kept its size within the same mtime second, so a stale or planted
-    one could stand in for the code under test. Installed packages (virtualenvs included) stay cached."""
+    one could stand in for the code under test. Virtualenvs (a folder with pyvenv.cfg) stay cached."""
     global PYC
     PYC = state_root() / "pyc"
     for top in {PYC / Path(os.path.abspath(root)).relative_to("/"), PYC / Path(root).resolve().relative_to("/")}:
         for d, dirs, files in os.walk(top):
-            dirs[:] = [x for x in dirs if not SKIP_DIRS.fullmatch(x)]
+            src = Path("/", Path(d).relative_to(PYC))
+            dirs[:] = [x for x in dirs if not (src / x / "pyvenv.cfg").is_file()]
             for f in files:
                 Path(d, f).unlink(missing_ok=True)
 
 
 def git(root, *args, check=True, env=None):
-    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=env or clean_env())
+    # a repo-local fsmonitor could hide changes from diff and add
+    p = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", *args], capture_output=True, text=True, env=env or clean_env())
     if check and p.returncode:
         raise Stop(f"git {' '.join(args)} failed: {p.stderr.strip()}")
     return p
@@ -170,8 +171,16 @@ def repo_checks(root, base, tool_config=True):
 
 
 def hidden_from_git(root):
-    """Skip-worktree and assume-unchanged files: git diff and git add (so the tree hash) can't see their changes."""
+    """What lets git diff and git add (so the tree hash and the scan) see other content than the tests run:
+    skip-worktree and assume-unchanged files, repo-local filters, and attributes outside the tracked tree."""
     out = []
+    # Repo config only: a user-wide filter such as git-lfs's is the user's own; fsmonitor is off in every git call.
+    conf = git(root, "config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$", check=False).stdout
+    out += [f"git config {l.split()[1]} is set in this repo, so git may not see the files as they are; remove it with "
+            f"`git config --unset {l.split()[1]}`" for l in conf.splitlines() if l.split()[:1] in (["local"], ["worktree"])]
+    attrs = Path(git(root, "rev-parse", "--path-format=absolute", "--git-path", "info/attributes").stdout.strip())
+    if attrs.is_file() and attrs.read_text(errors="replace").strip():
+        out.append(f"{attrs} is not empty; git attributes there can filter what git sees, so empty it")
     for e in zlist(root, "ls-files", "-v", "-z"):
         if e[0] == "S" or e[0].islower():
             flag = "skip-worktree" if e[0] == "S" else "assume-unchanged"
@@ -598,19 +607,25 @@ def lock(root, cfg, contract_path, amend):
                 if not any(f.startswith(p + ":") and f.endswith(f"test {n} has no assertion") for p, n in asserted)]
     for f in findings:
         print(f"FAIL scan {f}")
-    # An amended test may pass by now (the implementation can exist); it must still run.
-    blocking = [why for ok, why in results.values() if not ok and not (amend and "passes already" in why)]
+    # Mid-implementation a locked test may pass or fail for partial-code reasons; on a re-lock it only has to run.
+    blocking = [why for ok, why in results.values() if not ok and (not amend or why.startswith("did not run"))]
     if blocking or findings:
         if any(w.startswith("did not run") for w in blocking):
             print("  test output (last lines):\n" + "\n".join(f"    {l}" for l in out[-15:]))
-        print("  next: each test must fail on an assertion in the test, or on NotImplementedError from a source stub, "
-              "before any implementation exists. Fix the test or add the stub; never write the implementation.")
+        if amend:
+            print("  next: on a re-lock every locked test must run and the scan must be clean. The test author fixes "
+                  "what is listed, then the user reruns this command; nothing else changes until it prints lock: ok.")
+        else:
+            print("  next: each test must fail on an assertion in the test, or on NotImplementedError from a source stub, "
+                  "before any implementation exists. Fix the test or add the stub; never write the implementation.")
         print("lock: FAIL")
         return 1
 
     record = {**c, "locked_tests": {f: sha(root / f) for f in test_files(root, cfg, refs)},
               "protected_config": protected(root, cfg),
-              "locked_at": old.get("locked_at", now), "head_at_lock": git(root, "rev-parse", "HEAD").stdout.strip(),
+              "locked_at": old.get("locked_at", now),
+              # kept on a re-lock, so code committed before the dispute is still in verify's diff
+              "head_at_lock": old.get("head_at_lock") or git(root, "rev-parse", "HEAD").stdout.strip(),
               "amendments": old.get("amendments", [])}
     files = record["locked_tests"]
     if amend:
@@ -621,8 +636,14 @@ def lock(root, cfg, contract_path, amend):
                                      "changed": sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f)),
                                      "contract_changes": {k: {"before": old.get(k), "after": c.get(k)} for k in fields},
                                      "outcomes": {r: why for r, (_, why) in results.items()}})
+        a = record["amendments"][-1]
+        print("  changed since the last lock: " + (", ".join(a["changed"]) or "no files"))
+        for k, v in a["contract_changes"].items():
+            print(f"  contract {k}: {json.dumps(v['before'])} -> {json.dumps(v['after'])}")
     write_atomic(rec_path, json.dumps(record, indent=2) + "\n")
     write_atomic(m, task + "\n")
+    if amend and (att := load_json(task_dir(root, task) / "attempts.json")):
+        write_atomic(task_dir(root, task) / "attempts.json", json.dumps({**att, "streak": []}, indent=2) + "\n")  # the ruling starts a new streak
     print(f"lock: ok, {len(files)} test file(s) and {len(record['protected_config'])} config file(s) hashed{', amendment recorded' if amend else ''}")
     print(f"  record: {rec_path}")
     return 0
@@ -1017,8 +1038,8 @@ def render_packet(root, task, rec, d, status, ev, notes, notes_path):
             "- Mutation testing: not measured until stage 3.", "- Property tests: not measured until stage 3.",
             "", "## Review results", "", say("review results"),
             "", "## Test amendments and disputes", "", "*Measured: amendments recorded by `lock --amend`.*", ""]
-    out.append(bullets([f"{a['at']}: {cell(a['reason'])} (changed: {', '.join(a['changed']) or 'no files'}"
-                        f"{'; contract: ' + ', '.join(a['contract_changes']) if a.get('contract_changes') else ''})"
+    out.append(bullets([f"{cell(a['at'])}: {cell(a['reason'])} (changed: {', '.join(map(cell, a['changed'])) or 'no files'}"
+                        f"{'; contract: ' + ', '.join(map(cell, a['contract_changes'])) if a.get('contract_changes') else ''})"
                         for a in rec.get("amendments", [])]))
     if rec.get("tier") == "critical":
         out += ["", "## Read these hunks", "", say("read these hunks")]
@@ -1146,6 +1167,12 @@ COPY_CMD = re.compile(r"\b(cp|install|rsync|ln)\b")  # only the last argument is
 INLINE_CODE = re.compile(r"\b(python3?|node|ruby|perl|sh|bash|zsh)\b.*\s-[ce]\b")
 INSTALL = re.compile(r"\b(?:pip3?|python3?\s+-m\s+pip|uv\s+pip)\s+install\b(.*)|\b(?:uv|poetry|pdm)\s+add\b(.*)")
 INDEX_OPTS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "-f", "--find-links"}
+# Environment that moves the gate's state or Python's bytecode, or hides that a command runs inside Claude Code.
+ENV_DENY = re.compile(r"STAFF_STATE_DIR|PYTHONPYCACHEPREFIX|pycache_prefix|CLAUDECODE|\benv\s+(-[a-zA-Z]*i\b|--ignore-environment)")
+READ_ONLY = {"cat", "head", "tail", "ls", "grep", "rg", "wc", "stat", "file", "jq", "shasum", "sha256sum", "diff", "cmp",
+             "find", "tree", "du", "echo", "printf", "realpath", "readlink", "test", "["}
+WRAPPERS = {"env", "exec", "command", "nohup", "time", "nice"}
+GATE_FLAGS = {"--dr": "only the user drops a staff task", "--am": "only the user re-locks after a ruling, once they have read the changed test"}
 COMMIT_VALUE_OPTS = {"-m", "-F", "-C", "-c", "-t", "--message", "--file", "--author", "--date", "--template",
                      "--reuse-message", "--reedit-message"}
 
@@ -1268,20 +1295,19 @@ def skips_git_hooks(toks):
 
 def shell_decision(cmd, cwd):
     """('deny' | 'ask', reason) or None for a shell command run in cwd."""
-    if "STAFF_STATE_DIR" in cmd:
-        return "deny", f"commands may not set or use STAFF_STATE_DIR during a staff task; the gate uses its own state directory. {BEST_EFFORT}"
-    if "staff_gate" in cmd and "--dr" in cmd:  # also a prefix argparse would take
-        return "deny", f"only the user drops a staff task, from their own terminal; ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}"
-    if "staff_gate" in cmd and "--am" in cmd:
-        return "deny", (f"only the user re-locks after a ruling, from their own terminal, once they have read the changed test; "
-                        f"ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}")
+    bare = re.sub(r"[\"'\\]", "", cmd)  # quotes and backslashes removed, as the shell would
+    if m := ENV_DENY.search(bare):
+        return "deny", f"commands may not use {m[0]} during a staff task; the gate relies on its own environment. {BEST_EFFORT}"
     root = worktree_of(cwd)
     task, guard, names = active_task(root) if root else (None, None, set())
     home = str(Path.home())
     owned = [str(state_root().parent).lower(), ".local/share/staff", str(PLUGIN_ROOT).lower()]
-    if INLINE_CODE.search(cmd):  # whole command: quoted code may contain `;` or `|`
-        if hit := next((n for n in owned if n in cmd.lower()), None) or next((n for n in names if n in cmd), None):
-            return "deny", f"inline code names {hit}, a gate-owned, locked or protected path. {BEST_EFFORT}"
+    if INLINE_CODE.search(bare):  # whole command: quoted code may contain `;` or `|`
+        hit = next((n for n in owned if n in bare.lower()), None) or next((n for n in names if n in bare), None)
+        if re.search(r"\.py\b|\buvx?\b", bare):
+            hit = hit or next((f for f in GATE_FLAGS if f in bare), None)
+        if hit:
+            return "deny", f"inline code names {hit}, a gate-owned, locked or protected path or a flag only the user runs. {BEST_EFFORT}"
     here, asks = cwd, []
     for seg in SEGMENT.split(HARMLESS_REDIRECT.sub(" ", cmd)):
         try:  # punctuation_chars splits `>` from its target and keeps quoted names whole
@@ -1298,13 +1324,24 @@ def shell_decision(cmd, cwd):
             d = os.path.expanduser(toks[1].replace("$HOME", home)) if len(toks) > 1 else home
             here = Path(d) if os.path.isabs(d) else here / d
             continue
-        writes = bool(WRITE_CMD.search(seg) or COPY_CMD.search(seg))  # redirect targets are checked by identity below
-        if WRITE_CMD.search(seg):
+        words = [x for x in toks if not re.fullmatch(r"[A-Za-z_]\w*=.*", x)]  # without VAR=value prefixes
+        while words and words[0] in WRAPPERS:
+            words = words[1:]
+        name = Path(words[0]).name if words else ""
+        runs_py = bool(re.fullmatch(r"uvx?|python[\d.]*|pipx", name)) or name.endswith(".py")
+        if runs_py and (flag := next((f for f in GATE_FLAGS if any(x.startswith(f) for x in toks)), None)):
+            return "deny", (f"{GATE_FLAGS[flag]}, from their own terminal; ask in a message starting {NEEDS_INPUT}. {BEST_EFFORT}")
+        gate_run = runs_py and any(x.endswith(".py") and same_or_inside(here / os.path.expanduser(x), PLUGIN_ROOT / "scripts") for x in toks)
+        reads = name in READ_ONLY and not WRITE_CMD.search(seg)
+        if words and not (reads or gate_run):  # writes in a form the lists below don't know (tar -C, mkdir, curl -o...)
+            if hit := next((n for n in owned if n in " ".join(toks).lower()), None):
+                return "deny", f"this command names {hit}, which only the gate writes; only read-only commands may name it. {BEST_EFFORT}"
+            if why := gate_owned(here):
+                return "deny", f"this command runs in {here}: {why} {BEST_EFFORT}"
+        if WRITE_CMD.search(seg):  # redirect targets are checked by identity below
             targets += toks
         elif COPY_CMD.search(seg):
             targets += [a for a in toks if not a.startswith("-")][-1:]
-        if writes and (hit := next((n for n in owned if n in seg.lower()), None)):
-            return "deny", f"this command writes and names {hit}, which only the gate writes. {BEST_EFFORT}"
         for tok in targets:
             tok = os.path.expanduser(tok.split("=", 1)[-1].replace("${HOME}", home).replace("$HOME", home))
             if not tok:
@@ -1380,7 +1417,7 @@ def stop_reasons(root):
     """Why a session in this worktree may not stop yet: one line per unfinished task. A task is unfinished
     from lock until its packet; the marker alone isn't trusted, since deleting it would end the task."""
     tasks = {c.parent.name for c in (state_root() / "repos" / repo_key(root)).glob("*/contract.json")
-             if not (c.parent / "packet.md").exists()}
+             if not (c.parent / "packet.md").is_file()}
     m = marker(root)
     active = m.read_text().strip() if m.is_file() else None
     if active:
@@ -1419,26 +1456,29 @@ def open_dispute(root, d, task):
         return False
 
 
-def stop_root(cwd):
-    """The worktree a stop belongs to. Ancestors with gate state come first, so `cd .git` or into a nested
-    repo doesn't escape the task (Claude Code already resets a cwd outside the session's directories)."""
+def stop_roots(cwd):
+    """Every worktree a stop may belong to: the git top level and each ancestor with gate state, so `cd .git`
+    or into a nested repo doesn't escape the task. All of them count, so extra state can only add reasons."""
     p = cwd.resolve()
+    roots = []
     for q in (p, *p.parents):
         try:
             if marker(q).is_file() or (state_root() / "repos" / repo_key(q)).is_dir():
-                return q
+                roots.append(q)
         except Stop:
             continue  # path too long for a key, so no state can exist for it
-    return worktree_of(p)
+    top = worktree_of(p)
+    return roots + ([top] if top and top not in roots else [])
 
 
 def stop_hook(payload):
     """Stop event output (a dict to print, or None to allow)."""
     if str(payload.get("last_assistant_message") or "").lstrip().startswith(NEEDS_INPUT):
         return None
+    if any(isinstance(b, dict) and b.get("type") == "subagent" for b in payload.get("background_tasks") or []):
+        return None  # a pause, not the end: the session resumes when the subagent reports, and this hook runs again
     try:
-        root = stop_root(Path(payload.get("cwd") or os.getcwd()))
-        reasons = stop_reasons(root) if root else []
+        reasons = [r for root in stop_roots(Path(payload.get("cwd") or os.getcwd())) for r in stop_reasons(root)]
     except Exception as e:  # a crash would let the stop through, so it blocks instead
         reasons = [f"the gate could not check this worktree: {e}"]
     if not reasons:
@@ -1497,6 +1537,10 @@ def main(argv=None):
     hk = sub.add_parser("hook", help="hook logic; reads the hook payload from stdin")
     hk.add_argument("event", choices=["pre-tool", "post-tool", "stop"])
     args = ap.parse_args(argv)
+    if (getattr(args, "drop", None) or getattr(args, "amend", None)) and os.environ.get("CLAUDECODE"):
+        print("staff gate: --drop and --amend are the user's; run this in your own terminal, not inside Claude Code "
+              "(not with `!` either).", file=sys.stderr)
+        return 2
     if args.cmd == "hook":
         try:
             return hook(args.event)

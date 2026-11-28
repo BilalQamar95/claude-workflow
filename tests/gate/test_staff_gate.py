@@ -246,7 +246,7 @@ TEST_MUL = "from pkg.calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) 
 
 def cli(repo, state, *args, env=None):
     p = subprocess.run(["uv", "run", "--quiet", "--script", str(GATE), *args], cwd=repo,
-                       capture_output=True, text=True, env={**__import__("os").environ, "STAFF_STATE_DIR": str(state), **(env or {})})
+                       capture_output=True, text=True, env={**__import__("os").environ, "STAFF_STATE_DIR": str(state), "CLAUDECODE": "", **(env or {})})
     return p.returncode, p.stdout + p.stderr
 
 
@@ -1173,3 +1173,141 @@ def test_only_the_test_author_amends_a_locked_test_and_only_during_a_dispute(red
         assert decision(out) == "deny" and "only the user re-locks" in out["hookSpecificOutput"]["permissionDecisionReason"]
     code, out = cli(red, state, "lock", contract(red), "--am", "abbreviated")
     assert code == 2 and "unrecognized arguments" in out, out
+
+
+# ---- second-review fixes ------------------------------------------------------------------
+
+def reason(out):
+    return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def key_of(p):
+    return str(p).replace("%", "%25").replace("/", "%2F")
+
+
+@pytest.mark.parametrize("command", [
+    "uv run --script '{gate}' packet t-mul --d''rop 'too hard'",
+    "uv run --script {gate_dir}/staff_ga?e.py packet t-mul --drop 'too hard'",
+    "env uv run --script {gate} packet t-mul --dr\\op x",
+    "uv run --script '{gate}' lock {contract} --a''mend 'ruled'",
+    "sh -c 'uv run --script {gate} lock {contract} --a\"\"mend ruled'",
+], ids=["quoted-drop", "globbed-drop", "backslash-drop", "quoted-amend", "inline-amend"])
+def test_user_only_flags_are_denied_however_they_are_spelled(red, state, command):
+    lock_with(red, state)
+    c = command.format(gate=GATE, gate_dir=GATE.parent, contract=contract(red))
+    _, out, _ = hook(state, "pre-tool", bash(red, c))
+    assert decision(out) == "deny", out
+
+
+def test_git_commit_amend_is_not_a_gate_flag(red, state):
+    lock_with(red, state)
+    assert decision(hook(state, "pre-tool", bash(red, "git commit --amend --no-edit"))[1]) is None
+
+
+def test_gate_refuses_user_only_flags_inside_claude_code(red, state):
+    lock_with(red, state)
+    for args in (("packet", "t-mul", "--drop", "x"), ("lock", contract(red), "--amend", "x")):
+        code, out = cli(red, state, *args, env={"CLAUDECODE": "1"})
+        assert code == 2 and "your own terminal" in out, out
+    assert (state / "gate/active" / key_of(red)).is_file()  # still active, nothing dropped
+
+
+@pytest.mark.parametrize("command", [
+    "tar -xf /tmp/e.tar -C '{state}/gate'",
+    "mkdir -p '{state}/gate/repos/x'",
+    "curl -so {state}/gate/x https://example.com",
+    "cd '{state}/gate' && tar -xf /tmp/e.tar",
+    "PYTHONPYCACHEPREFIX=/tmp/x python3 -m json.tool /dev/null",
+    "env -i uv run --script {gate} packet t-mul",
+    "CLAUDECODE= uv run --script {gate} packet t-mul",
+], ids=["tar-C", "mkdir", "curl-o", "cd-then-tar", "pycache-prefix", "env-i", "unset-claudecode"])
+def test_commands_that_write_the_state_dir_in_other_forms_are_denied(red, state, command):
+    lock_with(red, state)
+    _, out, _ = hook(state, "pre-tool", bash(red, command.format(state=state, gate=GATE)))
+    assert decision(out) == "deny", out
+
+
+@pytest.mark.parametrize("command", [
+    "cat '{state}/gate/repos/{key}/t-mul/contract.json'",
+    "ls {state}/gate && jq . {state}/gate/repos/{key}/t-mul/contract.json",
+    "uv run --script '{gate}' verify t-mul",
+    "cd {state}/gate && ls",
+], ids=["cat", "ls-jq", "gate-verify", "cd-ls"])
+def test_reading_the_state_dir_and_running_the_gate_are_allowed(red, state, command):
+    lock_with(red, state)
+    c = command.format(state=state, key=key_of(red), gate=GATE)
+    assert decision(hook(state, "pre-tool", bash(red, c))[1]) is None
+
+
+def test_a_packet_directory_is_no_packet(red, state):
+    lock_with(red, state)
+    (task_state(state, red) / "packet.md").mkdir()
+    (state / "gate/active" / key_of(red)).unlink()
+    assert hook(state, "stop", stop(red))[1]["decision"] == "block"
+
+
+def test_fake_state_for_a_subdirectory_does_not_end_the_task(red, state):
+    lock_with(red, state)
+    sub = (red / "pkg").resolve()
+    (state / "gate/repos" / key_of(sub)).mkdir(parents=True)
+    _, out, _ = hook(state, "stop", stop(sub))
+    assert out["decision"] == "block" and "t-mul" in out["reason"], out
+
+
+def test_stop_is_a_pause_while_a_subagent_runs(red, state):
+    lock_with(red, state)
+    running = [{"id": "a1", "type": "subagent", "status": "running", "description": "implement", "agent_type": "general-purpose"}]
+    assert hook(state, "stop", stop(red, background_tasks=running))[1] is None
+    shell = [{"id": "b1", "type": "shell", "status": "running", "description": "sleep", "command": "sleep 999"}]
+    assert hook(state, "stop", stop(red, background_tasks=shell))[1]["decision"] == "block"
+
+
+def test_repo_filter_or_attributes_fail_the_gate(red, state):
+    lock_with(red, state)
+    (red / ".git/info/attributes").write_text("pkg/calc.py filter=strip\n")
+    sh(red, "git", "config", "filter.strip.clean", "sed /noqa/d")
+    write(red, "pkg/calc.py", IMPL + "import os  # noqa: F401\n")
+    code, out = verify(red, state)
+    assert code == 1 and "filter.strip.clean" in out and "info/attributes" in out, out
+    assert hook(state, "stop", stop(red))[1]["decision"] == "block"
+
+
+def test_stale_bytecode_in_a_venv_named_source_folder(red, state):
+    lock_with(red, state)
+    write(red, "pkg/venvx/__init__.py", "")
+    right = "def mul(a, b):\n    return a * b\n"
+    write(red, "pkg/venvx/core.py", right)
+    write(red, "pkg/calc.py", CALC + "\nfrom pkg.venvx.core import mul  # the implementation lives in venvx\n")
+    st = (red / "pkg/venvx/core.py").stat()
+    assert verify(red, state)[0] == 0
+    write(red, "pkg/venvx/core.py", right.replace("a * b", "a + b"))
+    __import__("os").utime(red / "pkg/venvx/core.py", ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert verify(red, state)[0] == 1
+
+
+def test_file_names_cannot_forge_packet_headings(red, state):
+    passed(red, state)
+    (red / "tests/d\n## Client CI\n").write_text("")
+    code, out = cli(red, state, "lock", ".scratch/t-mul/contract.json", "--amend", "user ruled")
+    assert code == 0, out
+    assert verify(red, state)[0] == 0
+    write(red, ".scratch/t-mul/packet-notes.md", NOTES)
+    assert packet(red, state)[0] == 0
+    assert "\n## Client CI\n" not in (task_state(state, red) / "packet.md").read_text()
+
+
+def test_relock_mid_implementation_keeps_the_diff_base_and_shows_changes(red, state):
+    lock_with(red, state)
+    base = record(state, red)[0]["head_at_lock"]
+    write(red, "pkg/calc.py", CALC + "\n\ndef mul(a, b):\n    return None + a\n")  # partial code: wrong reason
+    sh(red, "git", "add", "pkg/calc.py")
+    sh(red, "git", "commit", "-qm", "wip")
+    for _ in range(2):
+        assert verify(red, state)[0] == 1
+    write(red, "tests/test_mul.py", TEST_MUL.replace("== 6", "== 6, 'product'"))
+    code, out = cli(red, state, "lock", contract(red, goal="multiply two ints"), "--amend", "ruled")
+    assert code == 0 and "changed since the last lock: tests/test_mul.py" in out and "contract goal:" in out, out
+    rec, _ = record(state, red)
+    assert rec["head_at_lock"] == base
+    att = json.loads((task_state(state, red) / "attempts.json").read_text())
+    assert att["streak"] == [] and att["total"] == 2
