@@ -45,6 +45,7 @@ Check with the user that these seams match their expectations.
 
 - One criterion per behaviour, each matching a row of the spec's acceptance table. Prefer `test`; use `manual` only when a test can't show it, because manual criteria end up in the packet as things the user must check. At least one criterion must be a `test`, or there is nothing to lock.
 - A `test` ref names a test that doesn't exist yet, with a name that describes the behaviour (it is committed to the client's repo, so no criterion ids or workflow terms), under the repo's test roots (`test_roots` in `.staff-gate.toml`), at the seam agreed in step 2.
+- Behaviour that already works before the change is not a criterion: its test would pass at lock, and the lock rejects any criterion whose test doesn't fail first. List it in `invariants` instead; an existing test for it under the test roots is still locked and runs on every `verify`.
 - `allowed_new_deps` lists every package the implementation may add. Installing anything else during the task asks the user.
 - For a bug, the first criterion is the reported failure, stated as the correct behaviour, so its test reproduces the bug.
 
